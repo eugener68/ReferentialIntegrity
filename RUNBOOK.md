@@ -38,10 +38,9 @@ Skip widgets whose default is fine. You do **not** fill all 28 on day one.
 | **What** | Unity Catalog catalog containing silver tables you will repair |
 | **Enter** | Your real catalog, e.g. `prod_dwh` — **not** the placeholder `target_catalog` |
 
-**Important:** This value determines where `package_settings` is saved. Every downstream
-notebook (**01**–**06**) shows widgets **01** and **05** at the top — set them to the
-**same catalog and config schema** before running those notebooks (Databricks widgets
-do not copy from `00_setup` automatically).
+**Important:** This value determines where `package_settings` is saved. Notebooks **01–06**
+auto-find that table when it is the only `package_settings` in the config schema; otherwise
+set widgets **01** and **05** in those notebooks to match.
 
 ---
 
@@ -476,7 +475,7 @@ re-run. Alternative to widget **15**.
 ## End-to-end sequence (first pilot)
 
 1. Fill **1–4**, **11** (minimum). Run **`00_setup`** (note the printed `table:` path).
-2. Open **`01_config_discovery`**: set widgets **1** and **5** to match **00_setup**, then run **`01`**.
+2. Run **`01_config_discovery`** (auto-finds `package_settings` if unique; else set widgets **1** + **5**).
 3. **`01b_repair_triage`** (or **15**) → queue consumers.
 4. Run **02** → **03** (widgets **8–9**, **16–19** if needed).
 5. **21**=`classify` → **`00_setup`** → **04** classify.
@@ -490,7 +489,7 @@ re-run. Alternative to widget **15**.
 | Symptom | Check |
 |---------|--------|
 | `ri_repair` schema empty (no tables) | **00_setup** only creates `package_settings`; if schema exists but has **no tables**, save was skipped — sync latest code (dry_run bug fixed), set widget **1** to real catalog, re-run **00**. If `10_dry_run=true` on old code, table was never written |
-| `Package settings not found` / `target_catalog`.`ri_repair` | Widget **1** still default `target_catalog`, or **01** catalog ≠ **00_setup** catalog; re-run **00_setup** with real catalog, then set **01**+**05** in each downstream notebook |
+| `Package settings not found` / `target_catalog`.`ri_repair` | Re-run **00_setup** with real catalog in widget **1**; pull latest code (auto-discovery). If multiple catalogs have `ri_repair.package_settings`, set widget **1** explicitly |
 | Panel order wrong | Re-run **`00_setup`** after upgrade (widgets must show `01_`…`28_` prefix) |
 | No consumers queued | **01b** or **15**; `repair_mode=opt_in` needs `SELECTED` |
 | `providers_json` empty | Widget **11** before **01** |

@@ -139,11 +139,19 @@ REPAIR_STATUSES = frozenset({
 REPAIR_ACTIVE = frozenset({REPAIR_SELECTED, REPAIR_VERIFIED})  # populate / validate / sweep
 
 
-def _widget_names():
+def _widget_values():
+    """Read widget values from getAll() — more reliable than get() on Serverless/Git notebooks."""
+    out = {}
     try:
-        return {w.name for w in dbutils.widgets.getAll()}
+        for w in dbutils.widgets.getAll():
+            out[w.name] = (w.value or "").strip()
     except Exception:
-        return set()
+        pass
+    return out
+
+
+def _widget_names():
+    return set(_widget_values().keys())
 
 
 def get_or_create_widgets(defaults=None):
@@ -191,12 +199,27 @@ def init_setup_widgets():
     return ensure_setup_widgets()
 
 
+def _read_bootstrap_key(key, widget_vals, defaults):
+    """Resolve one bootstrap key from numbered widget, legacy name, or get()."""
+    pref = setup_widget_label(key)
+    for name in (pref, key):
+        v = widget_vals.get(name, "").strip()
+        if v:
+            return v
+        try:
+            v = dbutils.widgets.get(name).strip()
+            if v:
+                return v
+        except Exception:
+            pass
+    return defaults[key]
+
+
 def ensure_bootstrap_widgets():
     """Create catalog/schema locator widgets in downstream notebooks (no removeAll).
 
-    Widgets are per-notebook in Databricks. Notebooks 01–06 need 01_target_catalog and
-    05_config_schema set to the same values used in 00_setup so load_package_settings
-    can find the saved Delta table.
+    Widgets are per-notebook in Databricks. Notebooks 01–06 may show widgets 01 and 05;
+    load_package_settings also auto-discovers package_settings when the catalog is unique.
     """
     existing = _widget_names()
     for k in ("target_catalog", "config_schema"):
@@ -206,17 +229,66 @@ def ensure_bootstrap_widgets():
 
 
 def _bootstrap_settings():
-    """Catalog/schema to locate package_settings before the saved config is loaded."""
+    """Catalog/schema hint to locate package_settings (may be overridden by auto-discovery)."""
     ensure_bootstrap_widgets()
+    widget_vals = _widget_values()
     d = dict(ALL_WIDGET_DEFAULTS)
-    existing = _widget_names()
     for k in ("target_catalog", "config_schema"):
-        pref = setup_widget_label(k)
-        if pref in existing:
-            d[k] = dbutils.widgets.get(pref).strip()
-        elif k in existing:
-            d[k] = dbutils.widgets.get(k).strip()
+        d[k] = _read_bootstrap_key(k, widget_vals, ALL_WIDGET_DEFAULTS)
     return d
+
+
+def _discover_package_settings(config_schema):
+    """Find all package_settings tables in the given config schema (Unity Catalog)."""
+    sch = config_schema.replace("'", "''")
+    return spark.sql(f"""
+        SELECT table_catalog AS cat, table_schema AS sch
+        FROM system.information_schema.tables
+        WHERE lower(table_name) = 'package_settings'
+          AND lower(table_schema) = lower('{sch}')
+    """).collect()
+
+
+def _load_active_package_settings(bootstrap):
+    """Try bootstrap location, then auto-discover. Returns (fqn, config_json) or raises."""
+    schema = bootstrap["config_schema"]
+    cat = bootstrap["target_catalog"]
+
+    def _try(catalog, sch):
+        fqn = f"`{catalog}`.`{sch}`.package_settings"
+        rows = spark.sql(
+            f"SELECT config_json FROM {fqn} WHERE config_id = 'active'"
+        ).collect()
+        if rows:
+            return fqn, rows[0].config_json
+        raise LookupError("no active config_id row")
+
+    # 1) Bootstrap catalog when not the placeholder default
+    if cat and cat != ALL_WIDGET_DEFAULTS["target_catalog"]:
+        try:
+            return _try(cat, schema)
+        except Exception:
+            pass
+
+    # 2) Auto-discover (fixes Serverless widget read issues and per-notebook defaults)
+    discovered = _discover_package_settings(schema)
+    if len(discovered) == 1:
+        r = discovered[0]
+        fqn, cfg = _try(r.cat, r.sch)
+        print(f"Auto-located package_settings at {fqn} (widget 01_target_catalog was not used)")
+        return fqn, cfg
+    if len(discovered) > 1:
+        cats = sorted({r.cat for r in discovered})
+        raise Exception(
+            f"Multiple package_settings tables in schema `{schema}`: {cats}. "
+            f"Set widget 01_target_catalog to the correct catalog."
+        )
+
+    # 3) Last attempt with bootstrap even if placeholder (clear error path)
+    try:
+        return _try(cat, schema)
+    except Exception as exc:
+        raise exc
 
 
 def package_settings_fqn(w):
@@ -274,19 +346,21 @@ def verify_package_settings(w):
 def load_package_settings(require_saved=False):
     """Load config from Delta; fall back to widgets/defaults (00_setup first run)."""
     bootstrap = _bootstrap_settings()
-    cat, schema = bootstrap["target_catalog"], bootstrap["config_schema"]
-    fqn = f"`{cat}`.`{schema}`.package_settings"
+    cat = bootstrap["target_catalog"]
+    schema = bootstrap["config_schema"]
     try:
-        rows = spark.sql(
-            f"SELECT config_json FROM {fqn} WHERE config_id = 'active'"
-        ).collect()
-        if rows:
-            saved = json.loads(rows[0].config_json)
-            return {**bootstrap, **saved}
-        if require_saved:
-            raise LookupError("no active config_id row")
+        fqn, config_json = _load_active_package_settings(bootstrap)
+        saved = json.loads(config_json)
+        merged = {**bootstrap, **saved}
+        if merged.get("target_catalog") != cat or merged.get("config_schema") != schema:
+            print(
+                f"Loaded config from {fqn} "
+                f"(catalog={merged.get('target_catalog')}, schema={merged.get('config_schema')})"
+            )
+        return merged
     except Exception as exc:
         if require_saved:
+            fqn = f"`{cat}`.`{schema}`.package_settings"
             had_rows = isinstance(exc, LookupError)
             raise Exception(
                 _package_settings_not_found_msg(fqn, cat, had_rows=had_rows, cause=None if had_rows else exc)
@@ -302,8 +376,9 @@ def _package_settings_not_found_msg(fqn, cat, had_rows=False, cause=None):
         "Checklist:",
         "  1. Run 00_setup after setting widget 01_target_catalog to your real Unity Catalog",
         "     (not the placeholder 'target_catalog').",
-        "  2. In THIS notebook, set widgets 01_target_catalog and 05_config_schema to the",
-        "     same values as 00_setup (widgets are per-notebook in Databricks).",
+        "  2. Notebooks 01–06 auto-locate package_settings when only one exists in the",
+        "     config schema (widget 01 is optional in that case). Otherwise set",
+        "     01_target_catalog and 05_config_schema to match 00_setup.",
     ]
     if placeholder:
         lines.append(

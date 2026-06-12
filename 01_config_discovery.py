@@ -10,12 +10,11 @@
 # MAGIC
 # MAGIC Read-only on silver/gold. Safe to run anytime.
 # MAGIC
-# MAGIC **Prerequisite:** run `00_setup` first (sets widget **01** to your real catalog and saves
-# MAGIC to `{your_catalog}.ri_repair.package_settings`).
+# MAGIC **Prerequisite:** run `00_setup` first — saves config to
+# MAGIC `{your_catalog}.ri_repair.package_settings`.
 # MAGIC
-# MAGIC **Before running this notebook:** set widgets **`01_target_catalog`** and **`05_config_schema`**
-# MAGIC to the **same values as `00_setup`**. Databricks widgets are per-notebook — they do not
-# MAGIC carry over automatically.
+# MAGIC **Widgets 01 + 05:** optional if you have only one `package_settings` table in
+# MAGIC `ri_repair` (auto-discovered). Otherwise set them to match `00_setup`.
 
 # COMMAND ----------
 
