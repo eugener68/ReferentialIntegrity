@@ -870,6 +870,8 @@ def providers_by_name(ctx):
 
 
 CHOICE_SEP = "::"
+# Multiselect default must be in choices; use sentinel when nothing pre-selected
+TRIAGE_PICK_NONE = "— check consumers to queue —"
 
 def consumer_choice_key(consumer_table, fk_col):
     """Stable key for multiselect widgets (table::fk_col)."""

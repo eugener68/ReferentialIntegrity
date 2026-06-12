@@ -9,7 +9,8 @@
 # MAGIC ### How to use (two-step — Databricks widget limitation)
 # MAGIC
 # MAGIC 1. **Run All** (or run through cell 2) — builds the consumer list + multiselect.
-# MAGIC 2. In the widget panel, **check** the consumer×FK roles to repair.
+# MAGIC 2. In the widget panel, **uncheck** `— check consumers to queue —`, then **check**
+# MAGIC    the consumer×FK roles to repair (e.g. `transaction_fact::account_key`).
 # MAGIC 3. Set widget **`apply_changes`** → `true` and widget **`mark_unselected_discovered`**
 # MAGIC    → `skip` if remaining `DISCOVERED` rows should become `SKIPPED`.
 # MAGIC 4. **Run All again** — writes `repair_status=SELECTED` on checked rows.
@@ -62,6 +63,9 @@ else:
     choices = [consumer_choice_key(d["consumer_table"], d["fk_col"]) for d in candidates]
     defaults = [consumer_choice_key(d["consumer_table"], d["fk_col"])
                 for d in candidates if d["repair_status"] == REPAIR_SELECTED]
+    defaults = [d for d in defaults if d in choices]
+    picker_choices = [TRIAGE_PICK_NONE] + choices
+    default_str = ",".join(defaults) if defaults else TRIAGE_PICK_NONE
 
     # Triage-only widgets (do not call removeAll — package_settings loaded from Delta)
     triage_widgets = {"repair_pick", "mark_unselected_discovered", "apply_changes"}
@@ -71,8 +75,8 @@ else:
 
     dbutils.widgets.multiselect(
         "repair_pick",
-        ",".join(defaults),
-        choices,
+        default_str,
+        picker_choices,
         "Consumers to queue (SELECTED)",
     )
     dbutils.widgets.dropdown(
@@ -102,10 +106,12 @@ else:
 if not candidates:
     pass
 elif dbutils.widgets.get("apply_changes").strip().lower() != "true":
-    picked = [x.strip() for x in dbutils.widgets.get("repair_pick").split(",") if x.strip()]
+    picked = [x.strip() for x in dbutils.widgets.get("repair_pick").split(",")
+              if x.strip() and x.strip() != TRIAGE_PICK_NONE]
     print(f"Preview only — {len(picked)} checked. Set apply_changes=true and re-run to persist.")
 else:
-    picked = [x.strip() for x in dbutils.widgets.get("repair_pick").split(",") if x.strip()]
+    picked = [x.strip() for x in dbutils.widgets.get("repair_pick").split(",")
+              if x.strip() and x.strip() != TRIAGE_PICK_NONE]
     mark_skip = dbutils.widgets.get("mark_unselected_discovered").strip().lower() == "skip"
     apply_triage_selection(ctx, picked, mark_others_skipped=mark_skip)
     display(spark.sql(f"""
