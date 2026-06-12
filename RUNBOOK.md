@@ -488,7 +488,7 @@ re-run. Alternative to widget **15**.
 
 | Symptom | Check |
 |---------|--------|
-| `ri_repair` schema empty (no tables) | **00_setup** only creates `package_settings`; if schema exists but has **no tables**, save was skipped — sync latest code (dry_run bug fixed), set widget **1** to real catalog, re-run **00**. If `10_dry_run=true` on old code, table was never written |
+| `config_consumers` not found in `01` | Run **`01` from the top** (Run All). If output shows `[DRY-RUN] create config_consumers`, pull latest code — config DDL now uses `exec_infra` and ignores dry_run |
 | `Package settings not found` / `target_catalog`.`ri_repair` | Re-run **00_setup** with real catalog in widget **1**; pull latest code (auto-discovery). If multiple catalogs have `ri_repair.package_settings`, set widget **1** explicitly |
 | Panel order wrong | Re-run **`00_setup`** after upgrade (widgets must show `01_`…`28_` prefix) |
 | No consumers queued | **01b** or **15**; `repair_mode=opt_in` needs `SELECTED` |

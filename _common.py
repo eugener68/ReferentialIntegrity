@@ -462,6 +462,11 @@ class Ctx:
             return spark.sql(sql)
         return None
 
+    def exec_infra(self, sql, label=""):
+        """Always execute — config schemas/tables must exist even when dry_run=true."""
+        print(f"\n-- [EXEC-INFRA] {label}\n{sql.strip()}\n")
+        return spark.sql(sql)
+
     def query(self, sql, label=""):
         if label:
             print(f"-- [QUERY] {label}")
@@ -616,6 +621,11 @@ def default_repair_status_on_discover(w):
 def ensure_consumer_repair_columns(ctx):
     """Add repair lifecycle columns to config_consumers (idempotent)."""
     fq = ctx.cfg("config_consumers")
+    try:
+        spark.table(fq.replace("`", ""))
+    except Exception:
+        print(f"skip ensure_consumer_repair_columns — {fq} not created yet (run 01 DDL first)")
+        return
     ensure_columns(ctx, fq, {
         "repair_status": "STRING",
         "selected_at": "TIMESTAMP",

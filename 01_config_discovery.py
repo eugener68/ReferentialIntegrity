@@ -37,8 +37,8 @@ for schema, comment in [
     (w["staging_schema"], "RI repair: legacy snapshots (retire after sign-off + retention)"),
     (w["keymap_schema"],  "RI repair: key-maps (KEEP PERMANENTLY - lineage/audit record)"),
 ]:
-    ctx.exec_mut(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{schema}` COMMENT '{comment}'",
-                 f"schema {schema}")
+    ctx.exec_infra(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{schema}` COMMENT '{comment}'",
+                   f"schema {schema}")
 
 # COMMAND ----------
 
@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS {ctx.cfg('sweep_results')} (
 }
 
 for name, stmt in ddl.items():
-    ctx.exec_mut(stmt, f"create {name}")
+    ctx.exec_infra(stmt, f"create {name}")
 
 ensure_consumer_repair_columns(ctx)
 
