@@ -488,7 +488,7 @@ re-run. Alternative to widget **15**.
 
 | Symptom | Check |
 |---------|--------|
-| `config_consumers` not found in `01` | Run **`01` from the top** (Run All). If output shows `[DRY-RUN] create config_consumers`, pull latest code — config DDL now uses `exec_infra` and ignores dry_run |
+| `config_consumers` empty after `01` | Check section 3 output: `discovered N pairs`. If N>0 but table empty on old code, `dry_run=true` skipped MERGE — pull latest (uses `exec_infra`). If N=0, wrong `target_schema` or `sk_col` mismatch |
 | `Package settings not found` / `target_catalog`.`ri_repair` | Re-run **00_setup** with real catalog in widget **1**; pull latest code (auto-discovery). If multiple catalogs have `ri_repair.package_settings`, set widget **1** explicitly |
 | Panel order wrong | Re-run **`00_setup`** after upgrade (widgets must show `01_`…`28_` prefix) |
 | No consumers queued | **01b** or **15**; `repair_mode=opt_in` needs `SELECTED` |

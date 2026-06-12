@@ -158,6 +158,9 @@ cols_df = spark.sql(f"""
   WHERE table_schema = '{w["target_schema"]}'
 """).collect()
 all_cols = [(r.table_name, r.column_name) for r in cols_df]
+tables_scanned = len({t for t, _ in all_cols})
+print(f"Discovery scan: catalog={cat}, target_schema={w['target_schema']}, "
+      f"dry_run={w['dry_run']} ({tables_scanned} tables, {len(all_cols)} columns)")
 
 discovered = []
 discover_status = default_repair_status_on_discover(w)
@@ -169,7 +172,7 @@ for p in providers:
             ev = hub["effective_start_col"] if hub else None
             discovered.append((tbl, col, p["provider_table"], ev, discover_status))
 
-print(f"discovered {len(discovered)} consumer x role pairs")
+print(f"discovered {len(discovered)} consumer x role pairs (exact sk_col match)")
 if discovered:
     schema = T.StructType([
         T.StructField("consumer_table", T.StringType()),
@@ -178,8 +181,10 @@ if discovered:
         T.StructField("event_date_col", T.StringType()),
         T.StructField("repair_status", T.StringType()),
     ])
-    spark.createDataFrame(discovered, schema).createOrReplaceTempView("_disc")
-    ctx.exec_mut(f"""
+    disc_df = spark.createDataFrame(discovered, schema)
+    display(disc_df)
+    disc_df.createOrReplaceTempView("_disc")
+    ctx.exec_infra(f"""
       MERGE INTO {ctx.cfg('config_consumers')} t
       USING _disc s
         ON lower(t.consumer_table) = lower(s.consumer_table)
@@ -193,6 +198,8 @@ if discovered:
               CASE WHEN s.repair_status = '{REPAIR_SELECTED}' THEN current_timestamp() ELSE NULL END,
               NULL, NULL, current_timestamp())""",
       "register discovered consumers (insert-only)")
+else:
+    print("No exact matches — confirm providers sk_col names exist as columns in target_schema.")
 
 # COMMAND ----------
 
