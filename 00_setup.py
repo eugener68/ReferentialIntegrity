@@ -12,6 +12,12 @@
 # MAGIC change config). Settings are saved to `{target_catalog}.{config_schema}.package_settings`
 # MAGIC and loaded automatically by every other notebook.
 # MAGIC
+# MAGIC **Run All is safe** — widget values are preserved across re-runs. After pulling
+# MAGIC widget renames, run `reset_setup_widgets()` once in a cell to rebuild the panel.
+# MAGIC
+# MAGIC **Expected after a successful run:** schema `{config_schema}` contains table
+# MAGIC `package_settings` (one row). Other config tables are created by **`01`**, not here.
+# MAGIC
 # MAGIC ### Placeholder table names (examples only — use **your** silver table names)
 # MAGIC
 # MAGIC | Placeholder | Archetype | What it stands for |
@@ -71,7 +77,7 @@
 
 # COMMAND ----------
 
-w = init_setup_widgets()
+w = ensure_setup_widgets()
 ctx = Ctx(w)
 cat = w["target_catalog"]
 
@@ -81,13 +87,23 @@ cat = w["target_catalog"]
 
 # COMMAND ----------
 
+if not cat or cat == "target_catalog":
+    raise ValueError(
+        "Set widget 01_target_catalog to your real Unity Catalog name before saving "
+        "(placeholder 'target_catalog' is not valid)."
+    )
+
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{w['config_schema']}` "
           f"COMMENT 'RI repair: config + audit/evidence tables'")
+if w["dry_run"].lower() == "true":
+    print("NOTE: 10_dry_run=true does not block saving package_settings (config always persists).")
 save_package_settings(ctx, w)
+fqn = verify_package_settings(w)
 
 print("Package settings saved.")
-print(f"  table: {package_settings_fqn(w)}")
+print(f"  table: {fqn}")
 print(f"  providers: {len(parse_json_widget(w, 'providers_json'))}")
 print(f"  manual consumers: {len(parse_json_widget(w, 'manual_consumers_json'))}")
 print(f"  classifications: {len(parse_json_widget(w, 'classifications_json'))}")
-print("\nNext: run 01_config_discovery (creates config tables + applies JSON config).")
+display(spark.sql(f"SHOW TABLES IN `{cat}`.`{w['config_schema']}`"))
+print("\nNext: run 01_config_discovery (creates remaining config tables + applies JSON config).")

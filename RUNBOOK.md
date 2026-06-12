@@ -36,7 +36,12 @@ Skip widgets whose default is fine. You do **not** fill all 28 on day one.
 | **Default** | `target_catalog` |
 | **Phase** | A — first run |
 | **What** | Unity Catalog catalog containing silver tables you will repair |
-| **Enter** | Your real catalog, e.g. `prod_dwh` |
+| **Enter** | Your real catalog, e.g. `prod_dwh` — **not** the placeholder `target_catalog` |
+
+**Important:** This value determines where `package_settings` is saved. Every downstream
+notebook (**01**–**06**) shows widgets **01** and **05** at the top — set them to the
+**same catalog and config schema** before running those notebooks (Databricks widgets
+do not copy from `00_setup` automatically).
 
 ---
 
@@ -145,18 +150,114 @@ Skip widgets whose default is fine. You do **not** fill all 28 on day one.
 |---|---|
 | **Default** | `[]` |
 | **Phase** | A — **must fill before `01`** |
-| **What** | JSON array: one object per key-providing dim / SCD2 / hub |
+| **What** | Registers every **provider** table — dims, SCD2s, and hubs that **issue surrogate keys** other tables reference |
 
-**Required fields:** `provider_table`, `archetype` (`SCD1`|`SCD2`|`HUB_SCD2`), `sk_col`,
-`nk_cols` (array), `topo_level` (0=dim, 1+=hub).
+#### What is a provider?
 
-**SCD2/HUB also:** `effective_start_col`, `effective_end_col`, optional `record_status_col`.
+A **provider** is a silver table whose **surrogate key column** (`sk_col`) appears as a foreign key in other tables (facts, other dims, hubs). The repair pipeline must know:
 
-**Optional:** `nk_type_overrides`, `use_status_tiebreaker`, `version_match_path`, `enabled`, `notes`.
+1. **Which tables are providers** (vs pure consumers)
+2. **How to identify rows** — the **natural key** columns (`nk_cols`) used to build hash fingerprints and key-maps
+3. **How to handle versions** — SCD2/hub effective dates, Path A vs B (set later in **02**)
+
+You enter this once per provider in widget **11**. On **`01_config_discovery`**, each object is upserted into `{target_catalog}.{config_schema}.config_providers`. Discovery then scans the target schema for any column whose **name matches a provider's `sk_col`** and registers those as consumers.
+
+**If this widget is empty, `01` fails** — there is nothing to discover or repair against.
+
+#### Choose the right `archetype`
+
+| Archetype | Use when | Example |
+|-----------|----------|---------|
+| **`SCD1`** | One row per business entity; no version history | `dimCountry`, `dimStatus` |
+| **`SCD2`** | Type-2 history; same NK can have many rows over time | `dimAccount`, `dimCustomer` |
+| **`HUB_SCD2`** | Hub/link table with its **own** SK **and** FKs to dims; also versioned | `hubAccountContact`, bridge tables |
+
+**Rule of thumb:** if other tables reference its SK **and** it has its own NK columns you hash on → it's a provider. Register hubs too (not just leaf dims).
+
+#### Field reference
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `provider_table` | ✅ | Silver table name (must match target schema exactly) |
+| `archetype` | ✅ | `SCD1`, `SCD2`, or `HUB_SCD2` |
+| `sk_col` | ✅ | Surrogate key column name. **Discovery matches consumers when `fk_col` = this name** |
+| `nk_cols` | ✅ | Ordered array of natural-key columns used to hash rows. Order matters — use the same order everywhere |
+| `topo_level` | ✅ | Dependency depth for **sweep order** in **06** (see below) |
+| `effective_start_col` | SCD2 / HUB | Column marking version start (e.g. `effectiveStartDate`) |
+| `effective_end_col` | SCD2 / HUB | Version end; NULL = open/current row |
+| `record_status_col` | Optional | Status flag for tie-breaking when `(nk, start)` is not unique |
+| `nk_type_overrides` | Optional | Map column → type for hashing: `"date"`, `"timestamp"`, `"bigint"`, `"decimal(p,s)"` |
+| `use_status_tiebreaker` | Optional | `true` only when you need status-based disambiguation (categorical match) |
+| `version_match_path` | Optional | `A` or `B` — usually leave unset; **02** diagnostic suggests this |
+| `enabled` | Optional | `false` to skip this provider (default `true`) |
+| `notes` | Optional | Free text for operators |
+
+#### `topo_level` — dependency depth
+
+Providers sit at different levels in your FK graph. **`topo_level` controls processing order** when a table is both provider and consumer (e.g. a hub):
+
+| Level | Typical tables | Meaning |
+|-------|----------------|---------|
+| **0** | Leaf SCD1 / SCD2 dims | Base keys — nothing "below" them in the graph |
+| **1** | Hubs referencing only level-0 dims | Process after their dim FKs are fixed |
+| **2+** | Hubs referencing other hubs | Higher in the chain |
+
+Facts don't appear here — they are auto-discovered as consumers. During **06_sweep**, tables that are also providers sweep **before** plain facts, sorted by `topo_level` ascending.
+
+#### How `sk_col` drives discovery
+
+Discovery assumes **mirrored column names**: if `dimAccount` has `keyAccount`, any target table with a column literally named `keyAccount` is registered as a consumer of `dimAccount`.
+
+- Role-played or renamed FKs (e.g. `keyAccountShipTo` → same dim) **won't** auto-match → use widget **12** (`manual_consumers_json`).
+- One provider can have many consumers; one consumer can reference multiple providers (one row per FK in `config_consumers`).
+
+#### Examples
+
+**Single SCD2 dim (most common pilot start):**
 
 ```json
 [{"provider_table":"dimAccount","archetype":"SCD2","sk_col":"keyAccount","nk_cols":["accountNumber"],"effective_start_col":"effectiveStartDate","effective_end_col":"effectiveEndDate","topo_level":0}]
 ```
+
+**SCD1 dim (no effective dates):**
+
+```json
+[{"provider_table":"dimCountry","archetype":"SCD1","sk_col":"keyCountry","nk_cols":["countryCode"],"topo_level":0}]
+```
+
+**Dim + hub in one wave** (hub references dim; hub gets `topo_level: 1`):
+
+```json
+[
+  {"provider_table":"dimAccount","archetype":"SCD2","sk_col":"keyAccount","nk_cols":["accountNumber"],"effective_start_col":"effectiveStartDate","effective_end_col":"effectiveEndDate","topo_level":0},
+  {"provider_table":"hubAccountContact","archetype":"HUB_SCD2","sk_col":"keyAccountContact","nk_cols":["accountNumber","contactId"],"effective_start_col":"effectiveStartDate","effective_end_col":"effectiveEndDate","topo_level":1}
+]
+```
+
+**Composite / typed natural keys:**
+
+```json
+[{"provider_table":"dimProduct","archetype":"SCD2","sk_col":"keyProduct","nk_cols":["productCode","regionCode"],"nk_type_overrides":{"productCode":"bigint"},"effective_start_col":"validFrom","effective_end_col":"validTo","topo_level":0}]
+```
+
+#### Operator checklist
+
+1. List every dim/SCD2/hub whose SK was reloaded or may be wrong.
+2. Confirm **`sk_col`** names match what facts actually use (check one fact table in SQL).
+3. Confirm **`nk_cols`** are the columns that **uniquely identify the business entity** in legacy and silver (not the SK).
+4. Set **`topo_level`** — dims `0`, hubs `1+` based on what they reference.
+5. Paste as **one compact JSON array** in the widget (no line breaks required).
+6. Run **`00_setup`** → **`01`** → verify `config_providers` and discovered consumers.
+
+#### Common mistakes
+
+| Mistake | Symptom |
+|---------|---------|
+| Empty `[]` | `01` errors: *No enabled providers* |
+| Wrong `sk_col` | Consumers not discovered; use **12** or fix name |
+| Missing `effective_start_col` on SCD2 | Upsert fails at `01` |
+| `nk_cols` order changed mid-run | Hashes/key-maps won't match — set **20** `recompute_hashes=true` |
+| Hub registered as `SCD2` instead of `HUB_SCD2` | Wrong validation/sweep behavior for hub-specific rules |
 
 ---
 
@@ -374,12 +475,13 @@ re-run. Alternative to widget **15**.
 
 ## End-to-end sequence (first pilot)
 
-1. Fill **1–4**, **11** (minimum). Run **`00_setup`** → **`01_config_discovery`**.
-2. **`01b_repair_triage`** (or **15**) → queue consumers.
-3. Run **02** → **03** (widgets **8–9**, **16–19** if needed).
-4. **21**=`classify` → **`00_setup`** → **04** classify.
-5. Fill **23** (and **24** if Path B). **21**=`populate` → **`00_setup`** → **04** populate.
-6. **05** → sign-off → **06** → **05** again.
+1. Fill **1–4**, **11** (minimum). Run **`00_setup`** (note the printed `table:` path).
+2. Open **`01_config_discovery`**: set widgets **1** and **5** to match **00_setup**, then run **`01`**.
+3. **`01b_repair_triage`** (or **15**) → queue consumers.
+4. Run **02** → **03** (widgets **8–9**, **16–19** if needed).
+5. **21**=`classify` → **`00_setup`** → **04** classify.
+6. Fill **23** (and **24** if Path B). **21**=`populate` → **`00_setup`** → **04** populate.
+7. **05** → sign-off → **06** → **05** again.
 
 ---
 
@@ -387,6 +489,8 @@ re-run. Alternative to widget **15**.
 
 | Symptom | Check |
 |---------|--------|
+| `ri_repair` schema empty (no tables) | **00_setup** only creates `package_settings`; if schema exists but has **no tables**, save was skipped — sync latest code (dry_run bug fixed), set widget **1** to real catalog, re-run **00**. If `10_dry_run=true` on old code, table was never written |
+| `Package settings not found` / `target_catalog`.`ri_repair` | Widget **1** still default `target_catalog`, or **01** catalog ≠ **00_setup** catalog; re-run **00_setup** with real catalog, then set **01**+**05** in each downstream notebook |
 | Panel order wrong | Re-run **`00_setup`** after upgrade (widgets must show `01_`…`28_` prefix) |
 | No consumers queued | **01b** or **15**; `repair_mode=opt_in` needs `SELECTED` |
 | `providers_json` empty | Widget **11** before **01** |

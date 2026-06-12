@@ -158,20 +158,56 @@ def get_or_create_widgets(defaults=None):
     return {k: dbutils.widgets.get(k).strip() for k in d}
 
 
-def init_setup_widgets():
-    """Reset and create the full widget panel (run only from 00_setup).
+def ensure_setup_widgets():
+    """Create the 00_setup widget panel if missing; preserve values on re-run.
 
-    Widget labels use NN_ prefixes (01_target_catalog … 28_apply_orphan_sk) because
-    Databricks sorts the widget panel alphabetically. RUNBOOK.md sections 1–28 match.
+    Do NOT call removeAll() here — Run All must not wipe operator input before save.
     """
+    existing = _widget_names()
+    prefixed = {setup_widget_label(k) for k in SETUP_WIDGET_ORDER}
+    # One-time upgrade: legacy unprefixed widget names → numbered panel
+    if existing and not existing.intersection(prefixed):
+        legacy = set(SETUP_WIDGET_ORDER) & existing
+        if legacy:
+            dbutils.widgets.removeAll()
+            existing = set()
+    for k in SETUP_WIDGET_ORDER:
+        label = setup_widget_label(k)
+        if label not in existing:
+            dbutils.widgets.text(label, str(ALL_WIDGET_DEFAULTS[k]))
+    return read_setup_widgets()
+
+
+def reset_setup_widgets():
+    """Wipe and recreate the widget panel with defaults (use after pulling widget renames)."""
     dbutils.widgets.removeAll()
     for k in SETUP_WIDGET_ORDER:
         dbutils.widgets.text(setup_widget_label(k), str(ALL_WIDGET_DEFAULTS[k]))
     return read_setup_widgets()
 
 
+def init_setup_widgets():
+    """Alias for ensure_setup_widgets (backward compatible)."""
+    return ensure_setup_widgets()
+
+
+def ensure_bootstrap_widgets():
+    """Create catalog/schema locator widgets in downstream notebooks (no removeAll).
+
+    Widgets are per-notebook in Databricks. Notebooks 01–06 need 01_target_catalog and
+    05_config_schema set to the same values used in 00_setup so load_package_settings
+    can find the saved Delta table.
+    """
+    existing = _widget_names()
+    for k in ("target_catalog", "config_schema"):
+        pref = setup_widget_label(k)
+        if pref not in existing and k not in existing:
+            dbutils.widgets.text(pref, str(ALL_WIDGET_DEFAULTS[k]))
+
+
 def _bootstrap_settings():
     """Catalog/schema to locate package_settings before the saved config is loaded."""
+    ensure_bootstrap_widgets()
     d = dict(ALL_WIDGET_DEFAULTS)
     existing = _widget_names()
     for k in ("target_catalog", "config_schema"):
@@ -187,18 +223,22 @@ def package_settings_fqn(w):
     return fq(w["target_catalog"], w["config_schema"], "package_settings")
 
 
-def ensure_package_settings_table(ctx):
-    ctx.exec_mut(f"""
-CREATE TABLE IF NOT EXISTS {ctx.cfg('package_settings')} (
+def ensure_package_settings_table(w):
+    """Always executes — package_settings must exist even when dry_run=true."""
+    fqn = package_settings_fqn(w)
+    print(f"\n-- [EXEC] create package_settings\nCREATE TABLE IF NOT EXISTS {fqn} ...\n")
+    spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {fqn} (
   config_id   STRING    NOT NULL,
   config_json STRING    NOT NULL,
   updated_at  TIMESTAMP NOT NULL
-) USING DELTA""", "create package_settings")
+) USING DELTA""")
 
 
 def save_package_settings(ctx, w):
-    """Persist the full widget dict to Delta (single active row)."""
-    ensure_package_settings_table(ctx)
+    """Persist the full widget dict to Delta (single active row). Always executes."""
+    ensure_package_settings_table(w)
+    fqn = package_settings_fqn(w)
     schema = T.StructType([
         T.StructField("config_id", T.StringType()),
         T.StructField("config_json", T.StringType()),
@@ -206,32 +246,80 @@ def save_package_settings(ctx, w):
     ])
     row = [("active", json.dumps(w, separators=(",", ":")), datetime.datetime.utcnow())]
     spark.createDataFrame(row, schema).createOrReplaceTempView("_pkg_save")
-    ctx.exec_mut(f"""
-MERGE INTO {ctx.cfg('package_settings')} t
-USING _pkg_save s ON t.config_id = s.config_id
-WHEN MATCHED THEN UPDATE SET *
-WHEN NOT MATCHED THEN INSERT *""", "save package_settings")
+    print(f"\n-- [EXEC] save package_settings\nDELETE + INSERT INTO {fqn}\n")
+    spark.sql(f"DELETE FROM {fqn} WHERE config_id = 'active'")
+    spark.sql(f"INSERT INTO {fqn} SELECT config_id, config_json, updated_at FROM _pkg_save")
+
+
+def verify_package_settings(w):
+    """Fail fast if package_settings is missing or has no active row."""
+    fqn = package_settings_fqn(w)
+    tables = spark.sql(
+        f"SHOW TABLES IN `{w['target_catalog']}`.`{w['config_schema']}` LIKE 'package_settings'"
+    ).collect()
+    if not tables:
+        raise RuntimeError(
+            f"{fqn} was not created. Re-run the save cell in 00_setup "
+            f"(if 10_dry_run was true on an older repo version, sync latest code first)."
+        )
+    n = spark.sql(
+        f"SELECT COUNT(*) AS n FROM {fqn} WHERE config_id = 'active'"
+    ).collect()[0].n
+    if n != 1:
+        raise RuntimeError(f"Expected 1 active row in {fqn}, found {n}.")
+    print(f"Verified: {fqn} (1 active config row)")
+    return fqn
 
 
 def load_package_settings(require_saved=False):
     """Load config from Delta; fall back to widgets/defaults (00_setup first run)."""
     bootstrap = _bootstrap_settings()
     cat, schema = bootstrap["target_catalog"], bootstrap["config_schema"]
+    fqn = f"`{cat}`.`{schema}`.package_settings"
     try:
         rows = spark.sql(
-            f"SELECT config_json FROM `{cat}`.`{schema}`.package_settings "
-            f"WHERE config_id = 'active'"
+            f"SELECT config_json FROM {fqn} WHERE config_id = 'active'"
         ).collect()
         if rows:
             saved = json.loads(rows[0].config_json)
             return {**bootstrap, **saved}
+        if require_saved:
+            raise LookupError("no active config_id row")
     except Exception as exc:
         if require_saved:
+            had_rows = isinstance(exc, LookupError)
             raise Exception(
-                "Package settings not found. Run 00_setup first, "
-                f"then 01_config_discovery. ({exc})"
+                _package_settings_not_found_msg(fqn, cat, had_rows=had_rows, cause=None if had_rows else exc)
             ) from exc
     return get_or_create_widgets(bootstrap)
+
+
+def _package_settings_not_found_msg(fqn, cat, had_rows=False, cause=None):
+    placeholder = cat == ALL_WIDGET_DEFAULTS["target_catalog"]
+    lines = [
+        f"Package settings not found at {fqn}.",
+        "",
+        "Checklist:",
+        "  1. Run 00_setup after setting widget 01_target_catalog to your real Unity Catalog",
+        "     (not the placeholder 'target_catalog').",
+        "  2. In THIS notebook, set widgets 01_target_catalog and 05_config_schema to the",
+        "     same values as 00_setup (widgets are per-notebook in Databricks).",
+    ]
+    if placeholder:
+        lines.append(
+            "  → This notebook is still using the default catalog name 'target_catalog'."
+        )
+    if had_rows:
+        lines.append("  → Table exists but has no active row — re-run 00_setup.")
+    lines.append(
+        "  3. If 00_setup reported success but the table is missing, it may have run with"
+    )
+    lines.append(
+        "     10_dry_run=true (older versions skipped the save). Re-run 00_setup with dry_run=false."
+    )
+    if cause:
+        lines.append(f"\nUnderlying error: {cause}")
+    return "\n".join(lines)
 
 
 def parse_json_widget(w, key):
