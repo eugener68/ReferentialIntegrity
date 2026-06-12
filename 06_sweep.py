@@ -22,6 +22,7 @@
 
 w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
+assert_mutating_target_allowed(ctx)
 providers = providers_by_name(ctx)
 consumers = load_consumers(ctx, repair_phase="repair")
 assert consumers, "No consumers queued for repair."
@@ -162,9 +163,9 @@ display(spark.sql(f"""
 
 if errors:
     raise Exception("06 finished with issues:\n" + "\n".join(errors))
-print("""06 complete. Remaining checklist (§8):
-  - re-run 05_validate (battery must still pass post-sweep)
-  - REBUILD GOLD from repaired silver, re-run RI battery in gold
-  - resume pipelines (silver loads first, then gold refresh)
+print("""06 complete. Next steps:
+  - re-run 05_validate on repair target (WIP if wip_clone)
+  - run 07_promote to merge/swap/repoint repaired data to production
+  - re-run 05 with validation_target=prod for post-cutover sign-off
   - keep: keymap schema (permanent), hash columns (forever), snapshots (per retention)
-  - prevention: populate nk_hash at ingest in silver load logic from now on""")
+  - prevention: populate nk_hash at ingest so reloads don't break RI again""")

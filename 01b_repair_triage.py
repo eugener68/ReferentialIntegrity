@@ -119,4 +119,4 @@ else:
       FROM {ctx.cfg('config_consumers')}
       WHERE repair_status IN ('SELECTED', 'SKIPPED')
       ORDER BY repair_status, consumer_table, fk_col"""))
-    print("Next: 04_consumer_hash (mode=classify) on SELECTED rows.")
+    print("Next: 02_snapshot_diagnostic → 02b_wip_clone → 03 … (or 04 classify if rehearsing classify-only).")

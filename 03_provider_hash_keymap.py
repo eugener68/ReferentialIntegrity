@@ -7,8 +7,8 @@
 # MAGIC 2. Uniqueness / window-overlap **gates** (A2, B3). Failing tables get **no key-map**.
 # MAGIC 3. Build `keymap.<provider>_keymap` (A4, B4, D2) and audit its status distribution.
 # MAGIC
-# MAGIC ⚠️ Step 1 mutates target tables (column add + rewrite). Rehearse on clones first
-# MAGIC (`target_schema = rehearsal_silver`), and freeze pipelines for the real run.
+# MAGIC ⚠️ Step 1 mutates **repair target** tables (WIP clones when `repair_target_mode=wip_clone`,
+# MAGIC or production when `in_place`). Run **02b_wip_clone** first in default safe mode.
 
 # COMMAND ----------
 
@@ -18,6 +18,7 @@
 
 w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
+assert_mutating_target_allowed(ctx)
 providers = load_providers(ctx)
 assert providers, "No enabled providers in scope."
 errors, gate_failed = [], set()

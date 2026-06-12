@@ -22,6 +22,8 @@
 
 w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
+vt = w.get("validation_target", "auto")
+print(f"05 validation_target={vt}  repair_target_mode={repair_target_mode(w)}")
 providers = providers_by_name(ctx)
 consumers = load_consumers(ctx, repair_phase="repair")
 assert consumers, "No consumers queued for repair (repair_status SELECTED/VERIFIED)."
@@ -58,22 +60,22 @@ for c in consumers:
         continue
     pt = p["provider_table"]
     nk_col, ver_col = role_hash_cols(fk)
-    have = {x.lower() for x in table_columns(ctx.tgt(t))}
+    have = {x.lower() for x in table_columns(ctx.val(t))}
     if nk_col.lower() not in have:
         rec(c, "hash_column_present", 1, "FAIL", f"{nk_col} missing — run 04 populate")
         continue
 
     # (1) coverage — orphan report
     nulls = scalar(ctx.query(f"""
-      SELECT count(*) FROM {ctx.tgt(t)}
+      SELECT count(*) FROM {ctx.val(t)}
       WHERE `{nk_col}` IS NULL AND `{fk}` IS NOT NULL"""))
     rec(c, "coverage_null_hash", nulls, "INFO",
         "reconcile against expected orphans (ORPHAN_OLD / NOT_IN_LEGACY_DIM evidence)")
 
     # (2) member-level RI
     v = scalar(ctx.query(f"""
-      SELECT count(*) FROM {ctx.tgt(t)} f
-      LEFT ANTI JOIN {ctx.tgt(pt)} d ON f.`{nk_col}` = d.nk_hash
+      SELECT count(*) FROM {ctx.val(t)} f
+      LEFT ANTI JOIN {ctx.val(pt)} d ON f.`{nk_col}` = d.nk_hash
       WHERE f.`{nk_col}` IS NOT NULL"""))
     rec(c, "member_ri", v, "PASS" if v == 0 else "FAIL")
 
@@ -82,12 +84,12 @@ for c in consumers:
         if path(p) == "A":
             if ver_col.lower() in have:
                 v = scalar(ctx.query(f"""
-                  SELECT count(*) FROM {ctx.tgt(t)} f
-                  LEFT ANTI JOIN {ctx.tgt(pt)} d ON f.`{ver_col}` = d.ver_hash
+                  SELECT count(*) FROM {ctx.val(t)} f
+                  LEFT ANTI JOIN {ctx.val(pt)} d ON f.`{ver_col}` = d.ver_hash
                   WHERE f.`{ver_col}` IS NOT NULL"""))
                 rec(c, "version_ri_pathA", v, "PASS" if v == 0 else "FAIL")
                 v2 = scalar(ctx.query(f"""
-                  SELECT count(*) FROM {ctx.tgt(t)}
+                  SELECT count(*) FROM {ctx.val(t)}
                   WHERE `{nk_col}` IS NOT NULL AND `{ver_col}` IS NULL"""))
                 rec(c, "ver_hash_coverage", v2, "PASS" if v2 == 0 else "FAIL",
                     "member hash set but version hash missing")
@@ -102,8 +104,8 @@ for c in consumers:
                 # 02's no_window_overlap gate guarantees <=1 window per (hash, date);
                 # the remaining failure mode is 0 windows -> anti-join on the as-of predicate.
                 v = scalar(ctx.query(f"""
-                  SELECT count(*) FROM {ctx.tgt(t)} f
-                  LEFT ANTI JOIN {ctx.tgt(pt)} d
+                  SELECT count(*) FROM {ctx.val(t)} f
+                  LEFT ANTI JOIN {ctx.val(pt)} d
                     ON  f.`{nk_col}` = d.nk_hash
                    AND f.`{ev}` >= d.`{p['effective_start_col']}`
                    AND f.`{ev}` <  {window_end_expr(p['effective_end_col'], 'd')}
@@ -111,7 +113,7 @@ for c in consumers:
                 rec(c, "version_ri_pathB_window", v, "PASS" if v == 0 else "FAIL",
                     "rows whose event date falls in NO provider window (D4 edge case — triage each)")
                 v2 = scalar(ctx.query(f"""
-                  SELECT count(*) FROM {ctx.tgt(t)}
+                  SELECT count(*) FROM {ctx.val(t)}
                   WHERE `{nk_col}` IS NOT NULL AND `{ev}` IS NULL"""))
                 rec(c, "event_date_nulls", v2, "PASS" if v2 == 0 else "FAIL",
                     f"`{ev}` NULL on hashed rows — Path B cannot resolve these")
@@ -135,7 +137,7 @@ for c in consumers:
             GROUP BY km.nk_hash),
           target AS (
             SELECT `{nk_col}` AS nk_hash, {sums_t}
-            FROM {ctx.tgt(t)} WHERE `{nk_col}` IS NOT NULL GROUP BY 1)
+            FROM {ctx.val(t)} WHERE `{nk_col}` IS NOT NULL GROUP BY 1)
           SELECT count(*) FROM legacy l
           FULL OUTER JOIN target tg ON l.nk_hash = tg.nk_hash
           WHERE {diff}""", f"measure recon {t}.{fk}"))
@@ -155,7 +157,7 @@ for c in consumers:
 for t, roles in by_table.items():
     if t.lower() not in providers or len(roles) < 1:
         continue  # only hubs (consumer tables that are themselves providers)
-    have = {x.lower() for x in table_columns(ctx.tgt(t))}
+    have = {x.lower() for x in table_columns(ctx.val(t))}
     conds = []
     for c in roles:
         nk_col, _ = role_hash_cols(c["fk_col"])
@@ -164,7 +166,7 @@ for t, roles in by_table.items():
     if not conds:
         continue
     v = scalar(ctx.query(
-        f"SELECT count(*) FROM {ctx.tgt(t)} WHERE {' OR '.join(conds)}"))
+        f"SELECT count(*) FROM {ctx.val(t)} WHERE {' OR '.join(conds)}"))
     pseudo = dict(roles[0])
     pseudo["fk_col"] = "*ALL_ROLES*"
     rec(pseudo, "hub_row_consistency", v, "INFO",

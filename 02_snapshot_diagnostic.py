@@ -84,7 +84,7 @@ for p in providers:
     v2 = scalar(ctx.query(f"""
       SELECT count(*) FROM (
         SELECT {nk_hash_expr(p['nk_cols'], p['nk_type_overrides'])} h
-        FROM {ctx.tgt(t)}
+        FROM {ctx.prod(t)}
         GROUP BY 1
         HAVING count(DISTINCT {nk_string_expr(p['nk_cols'], p['nk_type_overrides'])}) > 1)"""))
     gates.append((RUN_ID, t, "hash_collision", v2, v2 == 0, datetime.datetime.utcnow()))
@@ -120,7 +120,7 @@ for p in providers:
       target AS (
         SELECT {nk_hash_expr(p['nk_cols'], p['nk_type_overrides'])} AS nk_hash,
                `{start}` AS esd, count(*) c
-        FROM {ctx.tgt(t)} GROUP BY 1, 2)
+        FROM {ctx.prod(t)} GROUP BY 1, 2)
       SELECT CASE WHEN l.nk_hash IS NULL THEN 'VERSION_ONLY_IN_TARGET'
                   WHEN t.nk_hash IS NULL THEN 'VERSION_ONLY_IN_LEGACY'
                   ELSE 'VERSION_MATCHED' END AS status,
@@ -165,5 +165,5 @@ display(spark.sql(f"""
   FROM {ctx.cfg('config_providers')} ORDER BY topo_level, provider_table"""))
 
 if errors:
-    raise Exception("01 finished with blocking issues:\n" + "\n".join(errors))
-print("02 complete. Review paths above, then run 03_provider_hash_keymap.")
+    raise Exception("02 finished with blocking issues:\n" + "\n".join(errors))
+print("02 complete. Review paths above, then run 02b_wip_clone (wip_clone mode) or 03_provider_hash_keymap.")

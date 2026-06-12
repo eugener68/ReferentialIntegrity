@@ -2,9 +2,8 @@
 # MAGIC %md
 # MAGIC # 00 — Setup (single widget panel for the whole package)
 # MAGIC
-# MAGIC **Widget panel:** labels are **`01_target_catalog` … `28_apply_orphan_sk`** (numbered
-# MAGIC to match **RUNBOOK.md sections 1–28**). Open both side by side and fill top to bottom.
-# MAGIC Re-run this notebook after pulling updates to refresh widget labels.
+# MAGIC **Widget panel:** `00_setup_profile` + **`01_` … `36_`** (see **RUNBOOK.md**).
+# MAGIC For SCD1 pilot use **`00_setup_scd1`** or run **`track_scd1_dim_fact`** linearly.
 # MAGIC
 # MAGIC **Operator runbook:** **`RUNBOOK.md`** — one section per widget, same order as the panel.
 # MAGIC
@@ -79,31 +78,6 @@
 
 w = ensure_setup_widgets()
 ctx = Ctx(w)
-cat = w["target_catalog"]
-
-# COMMAND ----------
-
-# MAGIC %md ## Save settings to Delta
-
-# COMMAND ----------
-
-if not cat or cat == "target_catalog":
-    raise ValueError(
-        "Set widget 01_target_catalog to your real Unity Catalog name before saving "
-        "(placeholder 'target_catalog' is not valid)."
-    )
-
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{w['config_schema']}` "
-          f"COMMENT 'RI repair: config + audit/evidence tables'")
-if w["dry_run"].lower() == "true":
-    print("NOTE: 10_dry_run=true does not block saving package_settings (config always persists).")
-save_package_settings(ctx, w)
-fqn = verify_package_settings(w)
-
-print("Package settings saved.")
-print(f"  table: {fqn}")
-print(f"  providers: {len(parse_json_widget(w, 'providers_json'))}")
-print(f"  manual consumers: {len(parse_json_widget(w, 'manual_consumers_json'))}")
-print(f"  classifications: {len(parse_json_widget(w, 'classifications_json'))}")
-display(spark.sql(f"SHOW TABLES IN `{cat}`.`{w['config_schema']}`"))
-print("\nNext: run 01_config_discovery (creates remaining config tables + applies JSON config).")
+run_setup_save(ctx, w)
+display(spark.sql(f"SHOW TABLES IN `{w['target_catalog']}`.`{w['config_schema']}`"))
+print("\nNext: run 01_config_discovery (or open your track notebook).")

@@ -26,6 +26,9 @@ ctx = Ctx(w)
 mode = w["mode"].lower()
 assert mode in ("classify", "populate"), mode
 
+if mode == "populate":
+    assert_mutating_target_allowed(ctx)
+
 if mode == "classify":
     apply_setup_config(ctx, w, sections=("repair_selection",))
 elif mode == "populate":
@@ -65,7 +68,7 @@ if mode == "classify":
         t, fk = c["consumer_table"], c["fk_col"]
         dist = ctx.query(f"""
           SELECT coalesce(km.map_status, 'NOT_IN_LEGACY_DIM') AS status, count(*) c
-          FROM {ctx.tgt(t)} f
+          FROM {ctx.prod(t)} f
           LEFT JOIN (SELECT DISTINCT old_sk, map_status FROM {ctx.km(p['provider_table'])}
                      WHERE old_sk IS NOT NULL) km
             ON f.`{fk}` = km.old_sk
@@ -166,4 +169,4 @@ if mode == "classify":
 else:
     if errors:
         raise Exception("\n".join(errors))
-    print("04 populate complete. Next: 05_validate (the hard gate).")
+    print("04 populate complete. Next: 05_validate (the hard gate) on WIP/repair target.")

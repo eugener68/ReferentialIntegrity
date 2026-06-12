@@ -1,14 +1,45 @@
 # Hash-Spine RI Repair — Operator Runbook
 
-Open **`00_setup`** and this document **side by side**. The widget panel is sorted
-**alphabetically by Databricks**; each widget is prefixed **`01_` … `28_`** so panel
-order matches this runbook.
+Open **`00_setup_*`** (or **`RUNBOOK_STAGES.md`**) for day-to-day operations.
+This file is the **widget reference**.
 
-**Section 1 below = first widget in the panel** (`01_target_catalog`).  
-**Section 28 = last widget** (`28_apply_orphan_sk`).
+**Widget panel:** prefixed **`00_setup_profile` … `36_validation_target`** (37 keys).
+Re-run **`00_setup`** after pulling updates to refresh widget labels.
 
-After editing widgets: **Run `00_setup`** → settings save to
-`{target_catalog}.{config_schema}.package_settings`. Other notebooks load from there.
+After editing widgets: **Run setup** → settings save to
+`{target_catalog}.{config_schema}.package_settings`.
+
+---
+
+## Start here — pick a profile + track
+
+| Profile | Setup notebook | Track (run top-to-bottom) | When |
+|---------|----------------|---------------------------|------|
+| **`scd1_dim_fact`** | `00_setup_scd1` | **`track_scd1_dim_fact`** | SCD1 dim + fact(s) |
+| **`scd2_dim_fact`** | `00_setup_scd2` | **`track_scd2_dim_fact`** | SCD2 dim + fact(s) |
+| **`hub_scd2_wave`** | `00_setup_hub` | **`track_hub_scd2`** | SCD2 dim + **HUB_SCD2** hub + fact(s) |
+| **`fact_consumer`** | `00_setup_fact` | **`track_fact_consumer`** | Fact only (dim already done) |
+| **`full`** | `00_setup` | Manual **01…07** | Custom / all widgets |
+
+**Stage-by-stage guide (prerequisites, SQL checks, failures):** **[RUNBOOK_STAGES.md](RUNBOOK_STAGES.md)**
+
+Set widget **`00_setup_profile`** to match your track (`scd1_dim_fact` default).
+
+---
+
+## WIP clone workflow (default — safe mode)
+
+| Step | Notebook | Mutates prod? |
+|------|----------|---------------|
+| Setup | `00` → `01` → `01b` | No |
+| Snapshots | `02` | No (staging only) |
+| **Clone** | **`02b_wip_clone`** | **No** — creates `{wip_schema}.{table}__{run_id}` |
+| Repair | `03` → `04` → `05` → `06` | **No** — writes WIP clones only |
+| Promote | **`07_promote`** | **Yes** — merge/swap/view repoint to prod |
+| Sign-off | `05` with `validation_target=prod` | Read-only |
+
+**Default:** `repair_target_mode=wip_clone`. Production `{target_schema}` stays read-only
+until **07**. **`in_place`** is break-glass only (requires `accept_in_place_risk=true`).
 
 ---
 
@@ -16,18 +47,31 @@ After editing widgets: **Run `00_setup`** → settings save to
 
 | Step | Notebooks | Widget #s to change |
 |------|-----------|---------------------|
-| First-time setup | `00_setup` → `01` | **1–15** (environment + JSON + repair_mode) |
-| Pick consumers | `01b` *(or* **15** + re-run `00`/`01`) | Usually **01b** only |
-| Snapshots / key-maps | `02` → `03` | **8–9**, **16–20** if needed |
-| Classify | `04` classify | **21–22** |
-| Populate | `00_setup` → `04` populate | **20–21**, **23–24** |
-| Validate & sweep | `05` → `06` → `05` | **25–28** |
+| First-time setup | `00_setup_scd1` (or `_scd2` / `_fact`) → `01` | Profile setup + **15** `providers_json` |
+| Linear pilot | **`track_scd1_dim_fact`** | Fill widgets at each STOP only |
+| Pick consumers | `01b` *(or* **19** + re-run `00`/`01`) | Usually **01b** only |
+| WIP clones | **`02b`** | **12**=`wip_clone`, **14**=`wip_run_id` if reusing clones |
+| Snapshots / key-maps | `02` → `03` | **9–11**, **20–24** if needed |
+| Classify | `04` classify | **25–26** |
+| Populate | `00_setup` → `04` populate | **24–28** |
+| Validate & sweep | `05` → `06` → `05` | **29–32** |
+| Promote & prod validate | **`07`** → `05` | **33–36** (`validation_target=prod` after promote) |
 
-Skip widgets whose default is fine. You do **not** fill all 28 on day one.
+Skip widgets whose default is fine. Use **`RUNBOOK_STAGES.md`** for per-stage detail.
 
 ---
 
-## Widget reference (panel order = sections 1–28)
+## Widget reference (panel order)
+
+### 0 — `00_setup_profile`
+
+| | |
+|---|---|
+| **Default** | `scd1_dim_fact` |
+| **Values** | `full` \| `scd1_dim_fact` \| `scd2_dim_fact` \| `hub_scd2_wave` \| `fact_consumer` |
+| **What** | Controls which widgets matter; profile setup notebooks set this automatically |
+
+---
 
 ### 1 — `01_target_catalog`
 
@@ -110,7 +154,18 @@ set widgets **01** and **05** in those notebooks to match.
 
 ---
 
-### 8 — `08_provider_filter`
+### 8 — `08_wip_schema`
+
+| | |
+|---|---|
+| **Default** | `ri_wip` |
+| **Phase** | A |
+| **What** | Schema for shallow-clone repair workspace (`wip_clone` mode) |
+| **Enter** | Leave default; created by **00** and **02b** |
+
+---
+
+### 9 — `09_provider_filter`
 
 | | |
 |---|---|
@@ -121,7 +176,7 @@ set widgets **01** and **05** in those notebooks to match.
 
 ---
 
-### 9 — `09_consumer_filter`
+### 10 — `10_consumer_filter`
 
 | | |
 |---|---|
@@ -132,18 +187,28 @@ set widgets **01** and **05** in those notebooks to match.
 
 ---
 
-### 10 — `10_dry_run`
+### 11 — `11_dry_run`
 
 | | |
 |---|---|
 | **Default** | `false` |
 | **Phase** | Any mutating step |
 | **What** | `true` = print mutating SQL, do not execute (reads still run) |
-| **Use** | Rehearsal / inspect SQL on **03**, **04** populate, **06** |
+| **Use** | Rehearsal / inspect SQL on **03**, **04** populate, **06**, **07** |
 
 ---
 
-### 11 — `11_providers_json` ⭐ required
+### 11–14 — WIP / repair target
+
+| Widget | Default | Meaning |
+|--------|---------|---------|
+| **`12_repair_target_mode`** | `wip_clone` | **`wip_clone`** = 03–06 write WIP clones; **`in_place`** = mutate prod (dangerous) |
+| **`13_accept_in_place_risk`** | `false` | Must be **`true`** when using `in_place` on production |
+| **`14_wip_run_id`** | *(empty)* | Pin a clone wave; empty = latest ACTIVE set from **02b** |
+
+---
+
+### 15 — `15_providers_json` ⭐ required
 
 | | |
 |---|---|
@@ -458,6 +523,17 @@ Valid status: `SELECTED`, `SKIPPED`, `DISCOVERED`. Then re-run **`00_setup`** + 
 
 ---
 
+### 33–36 — Promote & post-cutover validation
+
+| Widget | Default | Meaning |
+|--------|---------|---------|
+| **`33_promote_mode`** | `merge_columns` | **`merge_columns`** \| **`swap_table`** \| **`repoint_view`** — see **07_promote** |
+| **`34_wip_row_keys_json`** | `[]` | Row keys for merge-back, e.g. `[{"table":"transaction_fact","row_key_cols":["transaction_id"]}]` |
+| **`35_promote_view_prefix`** | `v_` | View name for `repoint_view`: `{prefix}{table}` |
+| **`36_validation_target`** | `auto` | **05** reads: `auto` (= WIP in wip_clone), **`prod`** after **07** |
+
+---
+
 ## Phase B — `01b_repair_triage` (not in this widget list)
 
 After **01**, run **`01b_repair_triage`**: multiselect checklist → `apply_changes=true` →
@@ -472,15 +548,16 @@ re-run. Alternative to widget **15**.
 
 ---
 
-## End-to-end sequence (first pilot)
+## End-to-end sequence (recommended)
 
-1. Fill **1–4**, **11** (minimum). Run **`00_setup`** (note the printed `table:` path).
-2. Run **`01_config_discovery`** (auto-finds `package_settings` if unique; else set widgets **1** + **5**).
-3. **`01b_repair_triage`** (or **15**) → queue consumers.
-4. Run **02** → **03** (widgets **8–9**, **16–19** if needed).
-5. **21**=`classify` → **`00_setup`** → **04** classify.
-6. Fill **23** (and **24** if Path B). **21**=`populate` → **`00_setup`** → **04** populate.
-7. **05** → sign-off → **06** → **05** again.
+**Easiest:** open **`track_scd1_dim_fact`** (or `_scd2` / `_fact`) and run top-to-bottom,
+filling setup widgets at each **STOP**.
+
+Manual equivalent:
+
+1. **`00_setup_scd1`** → **`01`** → **`01b`** → **02** → **02b** → **03**
+2. **04** classify → attest in setup → **04** populate → **05** → **06** → **05**
+3. **`wip_row_keys_json`** → **07** → **05** (`validation_target=prod`)
 
 ---
 
@@ -490,7 +567,9 @@ re-run. Alternative to widget **15**.
 |---------|--------|
 | `config_consumers` empty after `01` | Check section 3 output: `discovered N pairs`. If N>0 but table empty on old code, `dry_run=true` skipped MERGE — pull latest (uses `exec_infra`). If N=0, wrong `target_schema` or `sk_col` mismatch |
 | `Package settings not found` / `target_catalog`.`ri_repair` | Re-run **00_setup** with real catalog in widget **1**; pull latest code (auto-discovery). If multiple catalogs have `ri_repair.package_settings`, set widget **1** explicitly |
-| Panel order wrong | Re-run **`00_setup`** after upgrade (widgets must show `01_`…`28_` prefix) |
+| Panel order wrong | Re-run **`00_setup`** after upgrade (widgets must show `01_`…`36_` prefix) |
+| No WIP clone / 03 fails | Run **02b** after **01b**; or set **14** to an ACTIVE `run_id` |
+| Promote merge fails | Fill **34** `wip_row_keys_json` for each consumer table |
 | No consumers queued | **01b** or **15**; `repair_mode=opt_in` needs `SELECTED` |
 | `providers_json` empty | Widget **11** before **01** |
 | 04 skips rows | **23** not set or `MIXED` |
@@ -501,6 +580,8 @@ re-run. Alternative to widget **15**.
 
 ## Related docs
 
+- **`RUNBOOK_STAGES.md`** — stage-by-stage operator guide (start here)
 - **`README.md`** — architecture and notebook list  
 - **`hash_spine_repair_plan.md`** — method detail  
 - **`01b_repair_triage`** — consumer multiselect picker
+- **`track_scd1_dim_fact`** / **`track_scd2_dim_fact`** / **`track_hub_scd2`** / **`track_fact_consumer`** — linear runs

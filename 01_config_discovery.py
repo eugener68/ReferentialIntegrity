@@ -36,6 +36,7 @@ for schema, comment in [
     (w["config_schema"],  "RI repair: config + audit/evidence tables"),
     (w["staging_schema"], "RI repair: legacy snapshots (retire after sign-off + retention)"),
     (w["keymap_schema"],  "RI repair: key-maps (KEEP PERMANENTLY - lineage/audit record)"),
+    (w["wip_schema"],     "RI repair: shallow clones for wip_clone mode"),
 ]:
     ctx.exec_infra(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{schema}` COMMENT '{comment}'",
                    f"schema {schema}")
@@ -122,6 +123,22 @@ CREATE TABLE IF NOT EXISTS {ctx.cfg('validation_results')} (
 CREATE TABLE IF NOT EXISTS {ctx.cfg('sweep_results')} (
   run_id STRING, consumer_table STRING, fk_col STRING, provider_table STRING,
   action STRING, rows_updated BIGINT, post_check_violations BIGINT, run_at TIMESTAMP
+) USING DELTA""",
+
+"wip_clones": f"""
+CREATE TABLE IF NOT EXISTS {ctx.cfg('wip_clones')} (
+  run_id           STRING NOT NULL,
+  logical_table    STRING NOT NULL,
+  table_kind       STRING NOT NULL,
+  source_fqn       STRING NOT NULL,
+  wip_fqn          STRING NOT NULL,
+  wip_table_name   STRING NOT NULL,
+  clone_status     STRING NOT NULL,
+  row_key_cols     ARRAY<STRING>,
+  cloned_at        TIMESTAMP,
+  promoted_at      TIMESTAMP,
+  promote_mode     STRING,
+  notes            STRING
 ) USING DELTA""",
 }
 

@@ -4,8 +4,21 @@ Implements `hash_spine_repair_plan.md` for all four archetypes — **SCD1 dim, S
 fact, hub SCD2** — driven entirely by two Delta config tables. One codebase, no
 per-table notebooks.
 
-**Operator guide:** **[RUNBOOK.md](RUNBOOK.md)** — **section 1 = widget `01_*`, section 28 =
-widget `28_*`**. Open side by side with `00_setup` and fill top to bottom.
+**Operator guide:** **[RUNBOOK_STAGES.md](RUNBOOK_STAGES.md)** (stage-by-stage) ·
+**[RUNBOOK.md](RUNBOOK.md)** (widget reference)
+
+**Default repair mode:** `repair_target_mode=wip_clone` — mutating steps write to
+`{wip_schema}` shallow clones; production is updated only via **`07_promote`**.
+
+## Choose your track
+
+| Profile | Setup | Linear track | Use when |
+|---------|-------|--------------|----------|
+| `scd1_dim_fact` | `00_setup_scd1` | **`track_scd1_dim_fact`** | SCD1 dim + fact(s) |
+| `scd2_dim_fact` | `00_setup_scd2` | **`track_scd2_dim_fact`** | SCD2 dim + fact(s) |
+| `hub_scd2_wave` | `00_setup_hub` | **`track_hub_scd2`** | SCD2 dim + hub + fact(s) |
+| `fact_consumer` | `00_setup_fact` | **`track_fact_consumer`** | Fact only (dim ready) |
+| `full` | `00_setup` | Manual **01…07** | All widgets / custom |
 
 ## Assumptions baked in
 
@@ -25,16 +38,21 @@ widget `28_*`**. Open side by side with `00_setup` and fill top to bottom.
 | # | Notebook | Mutates silver? | Does |
 |---|---|---|---|
 | — | `_common` | — | **Library only — do not run.** Loaded via `%run` from every notebook below. |
-| 00 | `00_setup` | no | **Single widget panel** — catalogs, pipeline toggles, JSON config; saves to `package_settings` |
+| 00 | `00_setup` | no | Full widget panel (37 keys); saves to `package_settings` |
+| 00 | `00_setup_scd1` / `_scd2` / `_hub` / `_fact` | no | **Profile setup** — widgets that matter per archetype |
+| **Track** | **`track_scd1_dim_fact`**, **`track_scd2_dim_fact`**, **`track_hub_scd2`**, **`track_fact_consumer`** | varies | Linear runbook — run top-to-bottom with STOP cells |
 | 01 | `01_config_discovery` | no | Schemas, config/result tables, applies JSON config, SK-name consumer discovery, edge-case scan |
 | 01b | `01b_repair_triage` | no | **Multiselect widget** — pick discovered consumer×FK rows → `SELECTED` / `SKIPPED` |
 | 02 | `02_snapshot_diagnostic` | no (staging only) | Legacy snapshots with in-flight `nk_hash`, collision gates, §2.2 version diagnostic → Path A/B per SCD2/hub |
-| 03 | `03_provider_hash_keymap` | **yes** | `nk_hash`/`ver_hash` on providers, uniqueness + window-overlap gates, key-map builds + audit |
+| 02b | `02b_wip_clone` | no | **Shallow clones** of in-scope providers + SELECTED consumers into `{wip_schema}` (default safe mode) |
+| 03 | `03_provider_hash_keymap` | **yes** (WIP or prod) | `nk_hash`/`ver_hash` on providers, uniqueness + window-overlap gates, key-map builds + audit |
 | 04 | `04_consumer_hash` | **yes** (populate mode) | `mode=classify`: C1 evidence per consumer×role (read-only). Human attests via `classifications_json`. `mode=populate`: per-role hash columns via key-map (C2a) or current dim (C2b). SKs untouched |
 | 05 | `05_validate` | no | Full battery: coverage, member RI, version RI (A/B), measure reconciliation, hub row consistency. **Raises on any FAIL — hard gate** |
-| 06 | `06_sweep` | **yes** | Guarded hash-join MERGE per role, hubs-before-facts, orphan handling, C5 post-checks. Refuses to run unless latest 05 run is green |
+| 06 | `06_sweep` | **yes** (WIP or prod) | Guarded hash-join MERGE per role, hubs-before-facts, orphan handling, C5 post-checks. Refuses to run unless latest 05 run is green |
+| 07 | `07_promote` | **yes** (prod cutover) | Merge/swap/repoint WIP clones back to production after green WIP validation |
 
-Run **00_setup** → **01_config_discovery** → **01b_repair_triage** → 02 → 03 → 04(classify) → *classifications* → 04(populate) → 05 → 06 → re-run 05.
+Run **`track_scd1_dim_fact`** (recommended) or manually:
+**00_setup_scd1** → **01** → **01b** → **02** → **02b** → 03 → 04(classify) → attest → 04(populate) → 05 → 06 → 05 → **07** → 05 (`validation_target=prod`).
 
 ## Repair queue (`config_consumers.repair_status`)
 
@@ -99,14 +117,18 @@ Widget limitations:
 
 ## Configuration (`00_setup` widgets)
 
-All parameters live in **`00_setup`**. Edit widgets, run the notebook to save, then run
-the pipeline notebooks (they load from `ri_repair.package_settings` automatically).
+All parameters live in a **setup notebook** (`00_setup_scd1`, `_scd2`, `_fact`, or full `00_setup`).
 
 ### Environment & scope
 
 | Widget | Default | Meaning |
 |---|---|---|
-| `target_catalog` / `target_schema` | `target_catalog` / `silver` | repair target; set `target_schema=rehearsal_silver` for rehearsal (§9) |
+| `setup_profile` | `scd1_dim_fact` | `full` \| `scd1_dim_fact` \| `scd2_dim_fact` \| `hub_scd2_wave` \| `fact_consumer` |
+| `target_catalog` / `target_schema` | `target_catalog` / `silver` | logical prod schema (`gold` if SKs generated there) |
+| `wip_schema` | `ri_wip` | shallow-clone workspace when `repair_target_mode=wip_clone` |
+| `repair_target_mode` / `accept_in_place_risk` | `wip_clone` / `false` | safe WIP mode vs break-glass `in_place` |
+| `promote_mode` / `wip_row_keys_json` | `merge_columns` / `[]` | **07** cutover strategy + merge keys |
+| `validation_target` | `auto` | **05** table target; set `prod` after **07** |
 | `source_catalog` / `source_schema` | `legacy_src` / `dbo` | foreign catalog (read-only) |
 | `config_schema` / `staging_schema` / `keymap_schema` | `ri_repair` / `staging` / `keymap` | repair artifacts |
 | `provider_filter` / `consumer_filter` | `*` | comma-separated scoping (e.g. pilot: `SCD2_provider` + `Fact_consumer`) |
@@ -177,15 +199,18 @@ After discovery, fill in `consumer_overrides_json` where needed:
 
 ## Rehearsal & production (plan §8–§9)
 
-00–02, 04-classify and 05 are read-only on silver — safe on live prod.
-For the mutating half: shallow-clone in-scope tables into `rehearsal_silver`, set
-`target_schema=rehearsal_silver` in `00_setup`, rerun 03→06 (don't VACUUM sources while
-clones exist), record timings, get sign-off. Production run = same runbook inside a
-frozen-pipeline window, key-maps rebuilt once inside the freeze, gold rebuilt parallel-and-swap.
+00–02, 04-classify, and 05 (read-only paths) are safe on live prod.
+
+**Default (wip_clone):** **02b** shallow-clones in-scope tables into `{wip_schema}`;
+**03–06** mutate clones only; **07** promotes to prod. Do not `VACUUM` source tables while
+clones exist.
+
+Legacy **`target_schema=rehearsal_silver`** approach still works but **`wip_clone`** is
+preferred — prod schema name stays `gold`, clones are uniquely named per run.
 
 ## Result/audit tables (in `ri_repair`)
 
 `package_settings`, `config_providers`, `config_consumers`, `discovery_edge_cases`, `version_diagnostics`,
 `gate_results`, `keymap_audit`, `classification_evidence`, `validation_results`,
-`sweep_results` — every run appends with a `run_id`, so the whole repair is replayable
+`sweep_results`, `wip_clones` — every run appends with a `run_id`, so the whole repair is replayable
 evidence for sign-off.

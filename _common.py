@@ -25,16 +25,17 @@ from pyspark.sql import types as T
 
 NULL_SENTINEL = "~NULL~"
 RUN_ID = f"{datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
-_COMMON_VERSION = "2024-06-config-autodiscover-v2"
+_COMMON_VERSION = "2024-06-profiles-tracks-v1"
 
 BASE_WIDGET_DEFAULTS = {
     "target_catalog": "target_catalog",     # Unity Catalog catalog with silver/gold
     "source_catalog": "legacy_src",         # Lakehouse Federation foreign catalog (read-only)
     "source_schema":  "dbo",                # schema in the foreign catalog (names mirrored)
-    "target_schema":  "silver",             # repair target; set to rehearsal_silver for rehearsal
+    "target_schema":  "silver",             # repair target schema (logical prod, e.g. gold)
     "config_schema":  "ri_repair",          # config + audit/result tables
     "staging_schema": "staging",            # legacy snapshots
     "keymap_schema":  "keymap",             # key-maps (permanent)
+    "wip_schema": "ri_wip",                 # shallow-clone workspace (wip_clone mode)
     "provider_filter": "*",                 # '*' or comma-separated provider table names
     "consumer_filter": "*",                 # '*' or comma-separated consumer table names
     "dry_run": "false",                     # 'true' = print mutating SQL instead of executing
@@ -67,19 +68,42 @@ REPAIR_MODE_WIDGET = {
     "repair_mode": "opt_in",   # opt_in: only SELECTED/VERIFIED are repaired; opt_out: legacy (all except SKIPPED/FIXED)
 }
 
+REPAIR_TARGET_WIDGETS = {
+    "repair_target_mode": "wip_clone",      # wip_clone (default) | in_place (break-glass)
+    "accept_in_place_risk": "false",        # required true when repair_target_mode=in_place
+    "wip_run_id": "",                       # empty = latest ACTIVE clone set from wip_clones
+}
+
+PROMOTE_WIDGET_DEFAULTS = {
+    "promote_mode": "merge_columns",        # merge_columns | swap_table | repoint_view
+    "wip_row_keys_json": "[]",              # row keys per table for merge_columns promote
+    "promote_view_prefix": "v_",            # repoint_view: view name = prefix + logical_table
+    "validation_target": "auto",            # auto | repair | prod — 05 table resolution
+}
+
+PROFILE_WIDGET = {
+    "setup_profile": "scd1_dim_fact",  # full | scd1_dim_fact | scd2_dim_fact | hub_scd2_wave | fact_consumer
+}
+
 ALL_WIDGET_DEFAULTS = {
+    **PROFILE_WIDGET,
     **BASE_WIDGET_DEFAULTS,
     **PIPELINE_WIDGET_DEFAULTS,
     **REPAIR_MODE_WIDGET,
+    **REPAIR_TARGET_WIDGETS,
+    **PROMOTE_WIDGET_DEFAULTS,
     **CONFIG_JSON_WIDGETS,
 }
 
-# Display order in 00_setup widget panel (matches RUNBOOK.md phases A→F, not alphabetical)
+# Display order in 00_setup widget panel (matches RUNBOOK.md phases A→G, not alphabetical)
 SETUP_WIDGET_ORDER = [
+    # 0 — Archetype profile (controls which widgets matter — see SETUP_PROFILES)
+    "setup_profile",
     # A — Environment & scope
     "target_catalog", "target_schema", "source_catalog", "source_schema",
-    "config_schema", "staging_schema", "keymap_schema",
+    "config_schema", "staging_schema", "keymap_schema", "wip_schema",
     "provider_filter", "consumer_filter", "dry_run",
+    "repair_target_mode", "accept_in_place_risk", "wip_run_id",
     # A — Provider / consumer registry (JSON)
     "providers_json", "manual_consumers_json", "exclude_consumers_json",
     "repair_mode", "repair_selection_json",
@@ -92,19 +116,200 @@ SETUP_WIDGET_ORDER = [
     "classifications_json", "consumer_overrides_json",
     # F — Validate & sweep (05–06)
     "measure_tolerance", "require_validation", "orphan_sk", "apply_orphan_sk",
+    # G — Promote & post-cutover validation (07)
+    "promote_mode", "wip_row_keys_json", "promote_view_prefix", "validation_target",
 ]
 
 assert set(SETUP_WIDGET_ORDER) == set(ALL_WIDGET_DEFAULTS), "SETUP_WIDGET_ORDER must list every widget exactly once"
 
+SETUP_PROFILES = {
+    "full": {
+        "title": "Full panel (all widgets)",
+        "visible": list(SETUP_WIDGET_ORDER),
+        "track_notebook": None,
+        "setup_notebook": "00_setup",
+    },
+    "scd1_dim_fact": {
+        "title": "SCD1 dimension + one fact (most common pilot)",
+        "visible": [
+            "setup_profile", "target_catalog", "target_schema", "source_catalog", "source_schema",
+            "config_schema", "staging_schema", "keymap_schema", "wip_schema",
+            "provider_filter", "consumer_filter", "dry_run",
+            "repair_target_mode", "accept_in_place_risk", "wip_run_id",
+            "providers_json", "manual_consumers_json", "exclude_consumers_json",
+            "repair_mode", "repair_selection_json",
+            "refresh_snapshots", "build_keymaps", "recompute_hashes",
+            "suggest_threshold", "classifications_json",
+            "measure_tolerance", "require_validation", "orphan_sk", "apply_orphan_sk",
+            "promote_mode", "wip_row_keys_json", "validation_target",
+        ],
+        "hidden_defaults": {"auto_set_path": "false", "mode": "classify"},
+        "track_notebook": "track_scd1_dim_fact",
+        "setup_notebook": "00_setup_scd1",
+    },
+    "scd2_dim_fact": {
+        "title": "SCD2 dimension + fact (Path A/B diagnostic)",
+        "visible": [
+            "setup_profile", "target_catalog", "target_schema", "source_catalog", "source_schema",
+            "config_schema", "staging_schema", "keymap_schema", "wip_schema",
+            "provider_filter", "consumer_filter", "dry_run",
+            "repair_target_mode", "accept_in_place_risk", "wip_run_id",
+            "providers_json", "manual_consumers_json", "exclude_consumers_json",
+            "repair_mode", "repair_selection_json",
+            "refresh_snapshots", "auto_set_path", "path_a_threshold",
+            "build_keymaps", "recompute_hashes",
+            "suggest_threshold", "classifications_json", "consumer_overrides_json",
+            "measure_tolerance", "require_validation", "orphan_sk", "apply_orphan_sk",
+            "promote_mode", "wip_row_keys_json", "promote_view_prefix", "validation_target",
+        ],
+        "hidden_defaults": {"mode": "classify"},
+        "track_notebook": "track_scd2_dim_fact",
+        "setup_notebook": "00_setup_scd2",
+    },
+    "hub_scd2_wave": {
+        "title": "SCD2 dim + HUB_SCD2 hub + fact(s) — topological wave",
+        "visible": [
+            "setup_profile", "target_catalog", "target_schema", "source_catalog", "source_schema",
+            "config_schema", "staging_schema", "keymap_schema", "wip_schema",
+            "provider_filter", "consumer_filter", "dry_run",
+            "repair_target_mode", "accept_in_place_risk", "wip_run_id",
+            "providers_json", "manual_consumers_json", "exclude_consumers_json",
+            "repair_mode", "repair_selection_json",
+            "refresh_snapshots", "auto_set_path", "path_a_threshold",
+            "build_keymaps", "recompute_hashes",
+            "suggest_threshold", "classifications_json", "consumer_overrides_json",
+            "measure_tolerance", "require_validation", "orphan_sk", "apply_orphan_sk",
+            "promote_mode", "wip_row_keys_json", "promote_view_prefix", "validation_target",
+        ],
+        "hidden_defaults": {"mode": "classify"},
+        "track_notebook": "track_hub_scd2",
+        "setup_notebook": "00_setup_hub",
+    },
+    "fact_consumer": {
+        "title": "Fact consumer only (provider already hashed + key-mapped)",
+        "visible": [
+            "setup_profile", "target_catalog", "target_schema", "wip_schema",
+            "consumer_filter", "dry_run",
+            "repair_target_mode", "accept_in_place_risk", "wip_run_id",
+            "manual_consumers_json", "exclude_consumers_json",
+            "repair_mode", "repair_selection_json",
+            "recompute_hashes", "suggest_threshold", "classifications_json",
+            "consumer_overrides_json",
+            "measure_tolerance", "require_validation", "orphan_sk", "apply_orphan_sk",
+            "promote_mode", "wip_row_keys_json", "validation_target",
+        ],
+        "hidden_defaults": {
+            "provider_filter": "*", "refresh_snapshots": "false",
+            "build_keymaps": "false", "mode": "classify",
+        },
+        "track_notebook": "track_fact_consumer",
+        "setup_notebook": "00_setup_fact",
+        "skip_stages": ["02", "03"],
+    },
+}
+
+for _pk, _pv in SETUP_PROFILES.items():
+    assert set(_pv["visible"]) <= set(SETUP_WIDGET_ORDER), f"profile {_pk} unknown widget"
+
+
+def resolve_setup_profile(w):
+    name = (w.get("setup_profile") or "scd1_dim_fact").strip().lower()
+    if name not in SETUP_PROFILES:
+        raise ValueError(f"Unknown setup_profile={name!r}. Choose: {', '.join(SETUP_PROFILES)}")
+    return name
+
+
+def apply_profile_hidden_defaults(w, profile_name=None):
+    """Fill hidden widget keys with profile defaults (does not overwrite visible widget values)."""
+    profile_name = profile_name or resolve_setup_profile(w)
+    prof = SETUP_PROFILES[profile_name]
+    visible = set(prof["visible"])
+    for k, v in prof.get("hidden_defaults", {}).items():
+        if k not in visible:
+            w.setdefault(k, str(v))
+            if not (w.get(k) or "").strip():
+                w[k] = str(v)
+    w["setup_profile"] = profile_name
+    return w
+
+
+def profile_visible_widgets(profile_name):
+    return SETUP_PROFILES[profile_name]["visible"]
+
+
+def print_profile_guide(w):
+    profile_name = resolve_setup_profile(w)
+    prof = SETUP_PROFILES[profile_name]
+    visible = prof["visible"]
+    hidden = [k for k in SETUP_WIDGET_ORDER if k not in visible]
+    print(f"\n=== Setup profile: {profile_name} — {prof['title']} ===")
+    print(f"Focus on {len(visible)} widgets (numbered in panel):")
+    for k in visible:
+        if k == "setup_profile":
+            continue
+        print(f"  {setup_widget_label(k)}")
+    if hidden:
+        print(f"\n{len(hidden)} widgets use profile defaults (you can ignore unless debugging):")
+        for k in hidden[:8]:
+            print(f"  {setup_widget_label(k)} = {w.get(k, ALL_WIDGET_DEFAULTS[k])}")
+        if len(hidden) > 8:
+            print(f"  ... and {len(hidden) - 8} more")
+    if prof.get("track_notebook"):
+        print(f"\nRecommended track notebook: {prof['track_notebook']} (linear run, fewer re-runs)")
+    if prof.get("skip_stages"):
+        print(f"Skip stages (provider already prepared): {', '.join(prof['skip_stages'])}")
+
+
+def patch_package_settings(overrides, require_saved=True):
+    """Update active package_settings (used by track notebooks to flip mode, etc.)."""
+    w = load_package_settings(require_saved=require_saved)
+    ctx = Ctx(w)
+    merged = {**w, **{k: str(v) for k, v in overrides.items()}}
+    apply_profile_hidden_defaults(merged)
+    save_package_settings(ctx, merged)
+    for k, v in overrides.items():
+        print(f"  package_settings.{k} = {v}")
+    return merged
+
+
+def run_setup_save(ctx, w):
+    """Shared save path for 00_setup and profile-specific setup notebooks."""
+    cat = w["target_catalog"]
+    if not cat or cat == "target_catalog":
+        raise ValueError(
+            "Set widget 01_target_catalog to your real Unity Catalog name before saving "
+            "(placeholder 'target_catalog' is not valid).")
+    apply_profile_hidden_defaults(w)
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{w['config_schema']}` "
+              f"COMMENT 'RI repair: config + audit/evidence tables'")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{w['wip_schema']}` "
+              f"COMMENT 'RI repair: shallow clones (wip_clone mode)'")
+    if w["dry_run"].lower() == "true":
+        print("NOTE: dry_run=true does not block saving package_settings.")
+    save_package_settings(ctx, w)
+    fqn = verify_package_settings(w)
+    print("Package settings saved.")
+    print(f"  table: {fqn}")
+    print(f"  profile: {w.get('setup_profile')}")
+    print(f"  providers: {len(parse_json_widget(w, 'providers_json'))}")
+    print(f"  manual consumers: {len(parse_json_widget(w, 'manual_consumers_json'))}")
+    print(f"  classifications: {len(parse_json_widget(w, 'classifications_json'))}")
+    print_profile_guide(w)
+    return fqn
+
 
 def setup_widget_label(logical_key):
     """Databricks displays widgets sorted alphabetically — numeric prefix fixes panel order."""
-    n = SETUP_WIDGET_ORDER.index(logical_key) + 1
+    if logical_key == "setup_profile":
+        return "00_setup_profile"
+    n = SETUP_WIDGET_ORDER.index(logical_key)
     return f"{n:02d}_{logical_key}"
 
 
 def logical_widget_key(widget_label):
     """Strip optional NN_ prefix from widget name -> logical key for package_settings."""
+    if widget_label == "00_setup_profile":
+        return "setup_profile"
     if len(widget_label) >= 3 and widget_label[:2].isdigit() and widget_label[2] == "_":
         return widget_label[3:]
     return widget_label
@@ -449,12 +654,57 @@ class Ctx:
     def __init__(self, w):
         self.w = w
         self.dry = w["dry_run"].lower() == "true"
+        self._wip_by_table = None
+        self._wip_run_id = None
 
-    def tgt(self, table):   return fq(self.w["target_catalog"], self.w["target_schema"], table)
+    def prod(self, table):
+        """Logical production table (target_catalog.target_schema)."""
+        return fq(self.w["target_catalog"], self.w["target_schema"], table)
+
+    def tgt(self, table):
+        """Mutating repair target: WIP clone when repair_target_mode=wip_clone, else prod."""
+        if repair_target_mode(self.w) == "wip_clone":
+            return self.wip(table)
+        return self.prod(table)
+
+    def val(self, table):
+        """Validation reads (05): validation_target=prod|repair|auto (default auto = tgt)."""
+        vt = (self.w.get("validation_target") or "auto").lower()
+        if vt == "prod":
+            return self.prod(table)
+        return self.tgt(table)
+
+    def wip_fqn(self, logical_table):
+        """Fully qualified WIP clone for logical_table in the active run."""
+        return self.wip(logical_table)
+
     def src(self, table):   return fq(self.w["source_catalog"], self.w["source_schema"], table)
     def stg(self, table):   return fq(self.w["target_catalog"], self.w["staging_schema"], f"legacy_{table}")
     def km(self, table):    return fq(self.w["target_catalog"], self.w["keymap_schema"], f"{table}_keymap")
     def cfg(self, table):   return fq(self.w["target_catalog"], self.w["config_schema"], table)
+
+    def _ensure_wip_map(self):
+        if self._wip_by_table is not None:
+            return
+        run_id = resolve_wip_run_id(self, required=True)
+        self._wip_run_id = run_id
+        esc = run_id.replace("'", "''")
+        rows = self.query(f"""
+          SELECT logical_table, wip_fqn FROM {self.cfg('wip_clones')}
+          WHERE run_id = '{esc}' AND clone_status = 'ACTIVE'""").collect()
+        self._wip_by_table = {r.logical_table.lower(): r.wip_fqn for r in rows}
+        if not self._wip_by_table:
+            raise RuntimeError(
+                f"No ACTIVE WIP clones for run_id={run_id}. Run 02b_wip_clone after 01/01b.")
+
+    def wip(self, table):
+        self._ensure_wip_map()
+        key = table.lower()
+        if key not in self._wip_by_table:
+            raise RuntimeError(
+                f"No WIP clone for '{table}' (run_id={self._wip_run_id}). "
+                f"Re-run 02b_wip_clone or set wip_run_id to an ACTIVE run.")
+        return self._wip_by_table[key]
 
     def exec_mut(self, sql, label=""):
         print(f"\n-- [{'DRY-RUN' if self.dry else 'EXEC'}] {label}\n{sql.strip()}\n")
@@ -950,6 +1200,197 @@ def last_merge_metrics(fqname):
 
 def role_hash_cols(fk_col):
     return f"{fk_col}_nk_hash", f"{fk_col}_ver_hash"
+
+
+# COMMAND ----------
+
+# MAGIC %md ## WIP shallow-clone helpers (repair_target_mode=wip_clone)
+
+# COMMAND ----------
+
+WIP_ACTIVE = "ACTIVE"
+WIP_SUPERSEDED = "SUPERSEDED"
+WIP_PROMOTED = "PROMOTED"
+WIP_DROPPED = "DROPPED"
+
+
+def repair_target_mode(w):
+    return (w.get("repair_target_mode") or "wip_clone").lower()
+
+
+def assert_mutating_target_allowed(ctx):
+    """Guard mutating notebooks (03–06). in_place requires explicit acceptance."""
+    mode = repair_target_mode(ctx.w)
+    if mode == "in_place":
+        if ctx.w.get("accept_in_place_risk", "false").lower() != "true":
+            raise RuntimeError(
+                "repair_target_mode=in_place mutates production directly.\n"
+                "  • Default safe mode: repair_target_mode=wip_clone (repairs in ri_wip clones).\n"
+                "  • Break-glass only: set accept_in_place_risk=true if you accept live mutation.")
+        print("WARNING: in_place — mutating production tables directly (no WIP buffer).")
+    elif mode == "wip_clone":
+        print(f"repair target: WIP schema `{ctx.w['wip_schema']}` "
+              f"(production `{ctx.w['target_schema']}` unchanged until 07_promote)")
+    else:
+        raise ValueError(f"Unknown repair_target_mode: {mode}")
+
+
+def wip_table_name(logical_table, run_id):
+    safe = re.sub(r"[^\w]", "_", run_id)
+    return f"{logical_table}__{safe}"
+
+
+def ensure_wip_schema(ctx):
+    cat, sch = ctx.w["target_catalog"], ctx.w["wip_schema"]
+    ctx.exec_infra(
+        f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{sch}` "
+        f"COMMENT 'RI repair: shallow clones (wip_clone mode)'",
+        "wip schema")
+
+
+def resolve_wip_run_id(ctx, required=False):
+    explicit = (ctx.w.get("wip_run_id") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        rows = ctx.query(f"""
+          SELECT run_id FROM {ctx.cfg('wip_clones')}
+          WHERE clone_status = '{WIP_ACTIVE}'
+          GROUP BY run_id ORDER BY max(cloned_at) DESC LIMIT 1""").collect()
+    except Exception:
+        rows = []
+    if rows:
+        return rows[0].run_id
+    if required and repair_target_mode(ctx.w) == "wip_clone":
+        raise RuntimeError(
+            "No ACTIVE WIP clones found. Run 02b_wip_clone after 01/01b, "
+            "or set wip_run_id to an existing ACTIVE run.")
+    return None
+
+
+def row_keys_by_table(w):
+    out = {}
+    for entry in parse_json_widget(w, "wip_row_keys_json"):
+        tbl = entry.get("table") or entry.get("logical_table")
+        cols = entry.get("row_key_cols") or entry.get("row_keys")
+        if tbl and cols:
+            out[tbl.lower()] = list(cols)
+    return out
+
+
+def resolve_row_key_cols(ctx, logical_table, providers, table_kind):
+    rk = row_keys_by_table(ctx.w)
+    key = logical_table.lower()
+    if key in rk:
+        return rk[key]
+    if table_kind == "PROVIDER":
+        p = providers.get(key)
+        if p:
+            return [p["sk_col"]]
+    raise ValueError(
+        f"No row_key_cols for {logical_table}. "
+        f"Add to wip_row_keys_json in 00_setup before merge_columns promote.")
+
+
+def collect_wip_clone_scope(ctx):
+    """Providers in scope + SELECTED consumers (unique table names)."""
+    providers = load_providers(ctx)
+    consumers = load_consumers(ctx, repair_phase="repair")
+    tables = {}
+    for p in providers:
+        tables[p["provider_table"].lower()] = ("PROVIDER", p["provider_table"])
+    for c in consumers:
+        t = c["consumer_table"]
+        if t.lower() not in tables:
+            tables[t.lower()] = ("CONSUMER", t)
+    return providers, consumers, list(tables.values())
+
+
+def supersede_active_clones(ctx, logical_tables):
+    if not logical_tables:
+        return
+    lowered = [t.lower() for t in logical_tables]
+    in_list = ", ".join(f"'{t.replace(chr(39), chr(39)+chr(39))}'" for t in lowered)
+    ctx.exec_infra(f"""
+      UPDATE {ctx.cfg('wip_clones')}
+      SET clone_status = '{WIP_SUPERSEDED}',
+          notes = concat_ws(' | ', notes, 'superseded by {RUN_ID}')
+      WHERE clone_status = '{WIP_ACTIVE}' AND lower(logical_table) IN ({in_list})""",
+                   "supersede prior ACTIVE clones")
+
+
+def register_wip_clone(ctx, run_id, logical_table, table_kind, source_fqn, wip_fqn,
+                       wip_name, row_key_cols=None):
+    schema = T.StructType([T.StructField(n, t) for n, t in [
+        ("run_id", T.StringType()), ("logical_table", T.StringType()),
+        ("table_kind", T.StringType()), ("source_fqn", T.StringType()),
+        ("wip_fqn", T.StringType()), ("wip_table_name", T.StringType()),
+        ("clone_status", T.StringType()), ("row_key_cols", T.ArrayType(T.StringType())),
+        ("cloned_at", T.TimestampType()), ("promoted_at", T.TimestampType()),
+        ("promote_mode", T.StringType()), ("notes", T.StringType())]])
+    now = datetime.datetime.utcnow()
+    row = [(run_id, logical_table, table_kind, source_fqn, wip_fqn, wip_name,
+            WIP_ACTIVE, row_key_cols, now, None, None, None)]
+    df = spark.createDataFrame(row, schema)
+    df.write.mode("append").saveAsTable(ctx.cfg("wip_clones").replace("`", ""))
+
+
+def create_wip_shallow_clone(ctx, run_id, logical_table, table_kind, providers):
+    src = ctx.prod(logical_table)
+    wip_name = wip_table_name(logical_table, run_id)
+    wip_fqn = fq(ctx.w["target_catalog"], ctx.w["wip_schema"], wip_name)
+    try:
+        row_keys = resolve_row_key_cols(ctx, logical_table, providers, table_kind)
+    except ValueError:
+        row_keys = None
+    ctx.exec_mut(
+        f"CREATE TABLE {wip_fqn} SHALLOW CLONE {src}",
+        f"shallow clone {logical_table} -> {wip_name}")
+    if not ctx.dry:
+        register_wip_clone(ctx, run_id, logical_table, table_kind, src, wip_fqn,
+                           wip_name, row_key_cols=row_keys)
+    print(f"  clone: {logical_table} -> {wip_fqn}")
+    return wip_fqn, wip_name
+
+
+def load_active_wip_clones(ctx, run_id=None):
+    run_id = run_id or resolve_wip_run_id(ctx, required=True)
+    esc = run_id.replace("'", "''")
+    rows = ctx.query(f"""
+      SELECT * FROM {ctx.cfg('wip_clones')}
+      WHERE run_id = '{esc}' AND clone_status = '{WIP_ACTIVE}'
+      ORDER BY table_kind, logical_table""").collect()
+    if not rows:
+        raise RuntimeError(f"No ACTIVE clones for run_id={run_id}")
+    return run_id, [r.asDict() for r in rows]
+
+
+def promote_update_columns(ctx, logical_table, providers, consumers):
+    """Columns to copy from wip -> prod in merge_columns mode."""
+    key = logical_table.lower()
+    p = providers.get(key)
+    if p:
+        cols = ["nk_hash"]
+        if p["archetype"] in ("SCD2", "HUB_SCD2"):
+            cols.append("ver_hash")
+        return cols
+    cols = set()
+    for c in consumers:
+        if c["consumer_table"].lower() == key:
+            nk, ver = role_hash_cols(c["fk_col"])
+            cols.add(c["fk_col"])
+            cols.add(nk)
+            cols.add(ver)
+    return sorted(cols)
+
+
+def existing_columns(ctx, fqname):
+    return {c.lower() for c in table_columns(fqname)}
+
+
+def merge_join_predicate(row_key_cols, prod_alias="t", wip_alias="s"):
+    return " AND ".join(
+        f"{prod_alias}.`{c}` = {wip_alias}.`{c}`" for c in row_key_cols)
 
 
 print(f"_common loaded. RUN_ID = {RUN_ID} | {_COMMON_VERSION}")
