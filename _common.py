@@ -25,6 +25,7 @@ from pyspark.sql import types as T
 
 NULL_SENTINEL = "~NULL~"
 RUN_ID = f"{datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+_COMMON_VERSION = "2024-06-config-autodiscover-v2"
 
 BASE_WIDGET_DEFAULTS = {
     "target_catalog": "target_catalog",     # Unity Catalog catalog with silver/gold
@@ -241,12 +242,42 @@ def _bootstrap_settings():
 def _discover_package_settings(config_schema):
     """Find all package_settings tables in the given config schema (Unity Catalog)."""
     sch = config_schema.replace("'", "''")
-    return spark.sql(f"""
-        SELECT table_catalog AS cat, table_schema AS sch
-        FROM system.information_schema.tables
-        WHERE lower(table_name) = 'package_settings'
-          AND lower(table_schema) = lower('{sch}')
-    """).collect()
+    found = []
+    try:
+        found = spark.sql(f"""
+            SELECT table_catalog AS cat, table_schema AS sch
+            FROM system.information_schema.tables
+            WHERE lower(table_name) = 'package_settings'
+              AND lower(table_schema) = lower('{sch}')
+        """).collect()
+        if found:
+            return found
+    except Exception as exc:
+        print(f"information_schema discovery skipped ({exc})")
+
+    # Fallback: scan catalogs the session can see (Serverless / restricted UC)
+    scanned = []
+    try:
+        catalogs = [r.catalog for r in spark.sql("SHOW CATALOGS").collect()]
+    except Exception as exc:
+        print(f"SHOW CATALOGS discovery skipped ({exc})")
+        return []
+
+    for cat in catalogs:
+        try:
+            hits = spark.sql(
+                f"SHOW TABLES IN `{cat}`.`{config_schema}` LIKE 'package_settings'"
+            ).collect()
+            if hits:
+                scanned.append(type("Row", (), {"cat": cat, "sch": config_schema})())
+        except Exception:
+            continue
+    if scanned:
+        print(
+            f"Discovered package_settings via SHOW TABLES in {len(scanned)} catalog(s): "
+            f"{[r.cat for r in scanned]}"
+        )
+    return scanned
 
 
 def _load_active_package_settings(bootstrap):
@@ -345,6 +376,7 @@ def verify_package_settings(w):
 
 def load_package_settings(require_saved=False):
     """Load config from Delta; fall back to widgets/defaults (00_setup first run)."""
+    print(f"load_package_settings ({_COMMON_VERSION})")
     bootstrap = _bootstrap_settings()
     cat = bootstrap["target_catalog"]
     schema = bootstrap["config_schema"]
@@ -908,4 +940,4 @@ def role_hash_cols(fk_col):
     return f"{fk_col}_nk_hash", f"{fk_col}_ver_hash"
 
 
-print(f"_common loaded. RUN_ID = {RUN_ID}")
+print(f"_common loaded. RUN_ID = {RUN_ID} | {_COMMON_VERSION}")
