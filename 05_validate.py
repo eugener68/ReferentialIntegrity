@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 04 — Validation Battery (§6 C3, §7 D5) — THE HARD GATE
+# MAGIC # 05 — Validation Battery (§6 C3, §7 D5) — THE HARD GATE
 # MAGIC
 # MAGIC Read-only. Per consumer × FK role:
 # MAGIC 1. **coverage** (INFO): NULL-hash rows = the orphan report. Reconcile against expected orphans.
@@ -12,7 +12,7 @@
 # MAGIC    legacy vs target — catches values shifted between members, which RI checks can't see.
 # MAGIC 5. **hub row consistency** (INFO): hub rows resolving some roles but orphaning others.
 # MAGIC
-# MAGIC The notebook **raises** if any FAIL — do not proceed to 05 until green + business sign-off.
+# MAGIC The notebook **raises** if any FAIL — do not proceed to 06 until green + business sign-off.
 
 # COMMAND ----------
 
@@ -20,13 +20,11 @@
 
 # COMMAND ----------
 
-w = create_widgets({
-    "measure_tolerance": "0.01",   # abs diff tolerated per member in measure reconciliation
-})
+w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
 providers = providers_by_name(ctx)
-consumers = load_consumers(ctx)
-assert consumers, "No consumers in scope."
+consumers = load_consumers(ctx, repair_phase="repair")
+assert consumers, "No consumers queued for repair (repair_status SELECTED/VERIFIED)."
 
 res_schema = T.StructType([T.StructField(n, t) for n, t in [
     ("run_id", T.StringType()), ("consumer_table", T.StringType()),
@@ -62,7 +60,7 @@ for c in consumers:
     nk_col, ver_col = role_hash_cols(fk)
     have = {x.lower() for x in table_columns(ctx.tgt(t))}
     if nk_col.lower() not in have:
-        rec(c, "hash_column_present", 1, "FAIL", f"{nk_col} missing — run 03 populate")
+        rec(c, "hash_column_present", 1, "FAIL", f"{nk_col} missing — run 04 populate")
         continue
 
     # (1) coverage — orphan report
@@ -94,7 +92,7 @@ for c in consumers:
                 rec(c, "ver_hash_coverage", v2, "PASS" if v2 == 0 else "FAIL",
                     "member hash set but version hash missing")
             else:
-                rec(c, "version_ri_pathA", 1, "FAIL", f"{ver_col} missing — run 03 populate")
+                rec(c, "version_ri_pathA", 1, "FAIL", f"{ver_col} missing — run 04 populate")
         else:  # Path B — needs the fact's event date
             ev = c["event_date_col"]
             if not ev:
@@ -189,4 +187,7 @@ if fails:
     raise Exception(
         f"VALIDATION FAILED — {len(fails)} failing check(s). DO NOT SWEEP.\n" +
         "\n".join(f"  {f[1]}.{f[2]}: {f[4]} ({f[5]})" for f in fails))
-print(f"Validation GREEN (run_id={RUN_ID}). Obtain business sign-off, then run 05_sweep.")
+
+promote_consumers_verified(ctx, consumers, results, RUN_ID)
+print(f"Validation GREEN (run_id={RUN_ID}). repair_status -> VERIFIED for in-scope roles.")
+print("Obtain business sign-off, then run 06_sweep.")

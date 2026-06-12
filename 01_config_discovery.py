@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 00 — Config & Consumer Discovery
+# MAGIC # 01 — Config & Consumer Discovery
 # MAGIC
 # MAGIC Creates the repair schemas and config/result tables, lets you register **providers**
 # MAGIC (dims / SCD2s / hubs with their natural keys), then **auto-discovers consumers**:
@@ -9,6 +9,9 @@
 # MAGIC renamed FK columns) are surfaced to a review table and added manually.
 # MAGIC
 # MAGIC Read-only on silver/gold. Safe to run anytime.
+# MAGIC
+# MAGIC **Prerequisite:** run `00_setup` first to save widget values to
+# MAGIC `ri_repair.package_settings`.
 
 # COMMAND ----------
 
@@ -16,7 +19,7 @@
 
 # COMMAND ----------
 
-w = create_widgets()
+w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
 cat = w["target_catalog"]
 
@@ -41,7 +44,7 @@ ddl = {
 CREATE TABLE IF NOT EXISTS {ctx.cfg('config_providers')} (
   provider_table     STRING  NOT NULL,  -- table name (mirrored source<->target)
   archetype          STRING  NOT NULL,  -- 'SCD1' | 'SCD2' | 'HUB_SCD2'
-  sk_col             STRING  NOT NULL,  -- surrogate key column (e.g. keyAccount)
+  sk_col             STRING  NOT NULL,  -- surrogate key column (e.g. sk_SCD2_provider)
   nk_cols            ARRAY<STRING> NOT NULL,  -- natural key columns (USER-FED, ordered)
   nk_type_overrides  MAP<STRING,STRING>,      -- col -> 'date'|'timestamp'|'bigint'|'decimal(p,s)'
   effective_start_col STRING,           -- SCD2/HUB only
@@ -67,6 +70,10 @@ CREATE TABLE IF NOT EXISTS {ctx.cfg('config_consumers')} (
   excluded         BOOLEAN,
   exclusion_reason STRING,
   notes            STRING,
+  repair_status       STRING,
+  selected_at         TIMESTAMP,
+  fixed_at            TIMESTAMP,
+  last_validation_run_id STRING,
   updated_at       TIMESTAMP
 ) USING DELTA""",
 
@@ -118,75 +125,15 @@ CREATE TABLE IF NOT EXISTS {ctx.cfg('sweep_results')} (
 for name, stmt in ddl.items():
     ctx.exec_mut(stmt, f"create {name}")
 
-# COMMAND ----------
-
-# MAGIC %md ## 2. Register providers (USER INPUT — natural keys fed here)
+ensure_consumer_repair_columns(ctx)
 
 # COMMAND ----------
 
-def upsert_provider(provider_table, archetype, sk_col, nk_cols,
-                    nk_type_overrides=None, effective_start_col=None,
-                    effective_end_col=None, record_status_col=None,
-                    use_status_tiebreaker=False, version_match_path=None,
-                    topo_level=0, enabled=True, notes=None):
-    assert archetype in ("SCD1", "SCD2", "HUB_SCD2"), archetype
-    if archetype in ("SCD2", "HUB_SCD2"):
-        assert effective_start_col, f"{provider_table}: SCD2/HUB requires effective_start_col"
-    schema = T.StructType([
-        T.StructField("provider_table", T.StringType()),
-        T.StructField("archetype", T.StringType()),
-        T.StructField("sk_col", T.StringType()),
-        T.StructField("nk_cols", T.ArrayType(T.StringType())),
-        T.StructField("nk_type_overrides", T.MapType(T.StringType(), T.StringType())),
-        T.StructField("effective_start_col", T.StringType()),
-        T.StructField("effective_end_col", T.StringType()),
-        T.StructField("record_status_col", T.StringType()),
-        T.StructField("use_status_tiebreaker", T.BooleanType()),
-        T.StructField("version_match_path", T.StringType()),
-        T.StructField("topo_level", T.IntegerType()),
-        T.StructField("enabled", T.BooleanType()),
-        T.StructField("notes", T.StringType()),
-        T.StructField("updated_at", T.TimestampType()),
-    ])
-    row = [(provider_table, archetype, sk_col, list(nk_cols),
-            nk_type_overrides or {}, effective_start_col, effective_end_col,
-            record_status_col, use_status_tiebreaker, version_match_path,
-            topo_level, enabled, notes, datetime.datetime.utcnow())]
-    spark.createDataFrame(row, schema).createOrReplaceTempView("_prov_upsert")
-    spark.sql(f"""
-      MERGE INTO {ctx.cfg('config_providers')} t
-      USING _prov_upsert s ON lower(t.provider_table) = lower(s.provider_table)
-      WHEN MATCHED THEN UPDATE SET *
-      WHEN NOT MATCHED THEN INSERT *""")
-    print(f"provider upserted: {provider_table} ({archetype}, sk={sk_col}, nk={nk_cols})")
+# MAGIC %md ## 2. Apply config from `00_setup` widgets (`providers_json`, …)
 
 # COMMAND ----------
 
-# EXAMPLES — uncomment, adapt, run. Natural keys are the one thing only you know.
-#
-# upsert_provider("dimAccount", "SCD2", "keyAccount",
-#                 nk_cols=["accountNumber"],
-#                 effective_start_col="effectiveStartDate",
-#                 effective_end_col="effectiveEndDate",
-#                 record_status_col="recordStatus",
-#                 topo_level=0)
-#
-# upsert_provider("dimCustomer", "SCD1", "keyCustomer",
-#                 nk_cols=["customerCode"], topo_level=0)
-#
-# upsert_provider("dimRate", "SCD2", "keyRate",
-#                 nk_cols=["rateCode", "rateClass"],
-#                 nk_type_overrides={"rateClass": "bigint"},
-#                 effective_start_col="effectiveStartDate",
-#                 effective_end_col="effectiveEndDate", topo_level=0)
-#
-# upsert_provider("hubCustomerAccount", "HUB_SCD2", "keyCustomerAccount",
-#                 nk_cols=["accountNumber", "customerCode"],
-#                 effective_start_col="effectiveStartDate",
-#                 effective_end_col="effectiveEndDate",
-#                 record_status_col="recordStatus",
-#                 topo_level=1)   # references level-0 dims
-
+apply_setup_config(ctx, w, sections=("providers", "manual_consumers", "exclusions"))
 display(spark.table(ctx.cfg("config_providers").replace("`", "")))
 
 # COMMAND ----------
@@ -200,7 +147,7 @@ display(spark.table(ctx.cfg("config_providers").replace("`", "")))
 
 providers = load_providers(ctx)
 prov_idx = providers_by_name(ctx)
-assert providers, "No enabled providers registered — fill section 2 first."
+assert providers, "No enabled providers — set providers_json in 00_setup and re-run."
 
 cols_df = spark.sql(f"""
   SELECT table_name, column_name
@@ -210,14 +157,14 @@ cols_df = spark.sql(f"""
 all_cols = [(r.table_name, r.column_name) for r in cols_df]
 
 discovered = []
+discover_status = default_repair_status_on_discover(w)
 for p in providers:
     sk = p["sk_col"].lower()
     for tbl, col in all_cols:
         if col.lower() == sk and tbl.lower() != p["provider_table"].lower():
-            # hubs consuming dims: default event date = the hub's own validity start
             hub = prov_idx.get(tbl.lower())
             ev = hub["effective_start_col"] if hub else None
-            discovered.append((tbl, col, p["provider_table"], ev))
+            discovered.append((tbl, col, p["provider_table"], ev, discover_status))
 
 print(f"discovered {len(discovered)} consumer x role pairs")
 if discovered:
@@ -226,6 +173,7 @@ if discovered:
         T.StructField("fk_col", T.StringType()),
         T.StructField("provider_table", T.StringType()),
         T.StructField("event_date_col", T.StringType()),
+        T.StructField("repair_status", T.StringType()),
     ])
     spark.createDataFrame(discovered, schema).createOrReplaceTempView("_disc")
     ctx.exec_mut(f"""
@@ -235,17 +183,20 @@ if discovered:
        AND lower(t.fk_col) = lower(s.fk_col)
       WHEN NOT MATCHED THEN INSERT
         (consumer_table, fk_col, provider_table, event_date_col, measure_cols,
-         classification, discovered_by, excluded, exclusion_reason, notes, updated_at)
+         classification, discovered_by, excluded, exclusion_reason, notes,
+         repair_status, selected_at, fixed_at, last_validation_run_id, updated_at)
       VALUES (s.consumer_table, s.fk_col, s.provider_table, s.event_date_col, NULL,
-              NULL, 'AUTO', false, NULL, NULL, current_timestamp())""",
+              NULL, 'AUTO', false, NULL, NULL, s.repair_status,
+              CASE WHEN s.repair_status = '{REPAIR_SELECTED}' THEN current_timestamp() ELSE NULL END,
+              NULL, NULL, current_timestamp())""",
       "register discovered consumers (insert-only)")
 
 # COMMAND ----------
 
 # MAGIC %md ## 4. Edge-case scan — near-miss FK column names
-# MAGIC Role-played or renamed FKs (e.g. `keyAccountShipTo`, `parentAccountKey`) won't match
+# MAGIC Role-played or renamed FKs (e.g. `sk_SCD2_provider_roleB`) won't match
 # MAGIC exactly. Columns whose name *contains* the SK stem but isn't the SK are reported
-# MAGIC here for human triage; add real ones via `add_consumer()` below.
+# MAGIC here for human triage; add real ones via `manual_consumers_json` in `00_setup`.
 
 # COMMAND ----------
 
@@ -283,41 +234,39 @@ display(spark.sql(f"SELECT * FROM {ctx.cfg('discovery_edge_cases')} WHERE status
 
 # COMMAND ----------
 
-def add_consumer(consumer_table, fk_col, provider_table, event_date_col=None,
-                 measure_cols=None, notes="manual edge case"):
-    spark.sql(f"""
-      MERGE INTO {ctx.cfg('config_consumers')} t
-      USING (SELECT '{consumer_table}' ct, '{fk_col}' fk) s
-        ON lower(t.consumer_table)=lower(s.ct) AND lower(t.fk_col)=lower(s.fk)
-      WHEN NOT MATCHED THEN INSERT
-        (consumer_table, fk_col, provider_table, event_date_col, measure_cols,
-         classification, discovered_by, excluded, exclusion_reason, notes, updated_at)
-      VALUES ('{consumer_table}', '{fk_col}', '{provider_table}',
-              {f"'{event_date_col}'" if event_date_col else 'NULL'},
-              {("array(" + ",".join(f"'{m}'" for m in measure_cols) + ")") if measure_cols else "NULL"},
-              NULL, 'MANUAL', false, NULL, '{notes}', current_timestamp())""")
-    print(f"consumer added: {consumer_table}.{fk_col} -> {provider_table}")
+# COMMAND ----------
 
-def exclude_consumer(consumer_table, fk_col, reason):
-    spark.sql(f"""
-      UPDATE {ctx.cfg('config_consumers')}
-      SET excluded = true, exclusion_reason = '{reason}', updated_at = current_timestamp()
-      WHERE lower(consumer_table)=lower('{consumer_table}') AND lower(fk_col)=lower('{fk_col}')""")
-    print(f"consumer excluded: {consumer_table}.{fk_col} ({reason})")
-
-# add_consumer("factShipments", "keyAccountShipTo", "dimAccount", event_date_col="shipDate")
-# exclude_consumer("tmpAccountLoad", "keyAccount", "scratch table, not a real consumer")
+# MAGIC %md ## 5. Repair queue — overrides, selection, classifications
+# MAGIC
+# MAGIC **`repair_mode=opt_in`** (default): new discoveries → `DISCOVERED`; only `SELECTED` /
+# MAGIC `VERIFIED` rows are repaired in 04–06. Pick candidates in **`01b_repair_triage`**
+# MAGIC (multiselect widget), **`repair_selection_json`** in `00_setup`, or SQL below.
+# MAGIC
+# MAGIC Triage query (run in SQL editor or `%sql`):
+# MAGIC ```sql
+# MAGIC -- SELECT consumer_table, fk_col, provider_table, repair_status, classification
+# MAGIC -- FROM <catalog>.ri_repair.config_consumers
+# MAGIC -- WHERE repair_status = 'DISCOVERED' ORDER BY provider_table, consumer_table;
+# MAGIC
+# MAGIC -- UPDATE ... SET repair_status = 'SELECTED', selected_at = current_timestamp()
+# MAGIC -- WHERE consumer_table = '...' AND fk_col = '...';
+# MAGIC ```
 
 # COMMAND ----------
 
-# MAGIC %md ## 5. Review
+apply_setup_config(ctx, w, sections=("consumer_overrides", "repair_selection", "classifications"))
+
+# COMMAND ----------
+
+# MAGIC %md ## 6. Review repair registry
 
 # COMMAND ----------
 
 display(spark.sql(f"""
   SELECT c.consumer_table, c.fk_col, c.provider_table, p.archetype,
-         c.event_date_col, c.classification, c.discovered_by, c.excluded
+         c.repair_status, c.classification, c.event_date_col,
+         c.discovered_by, c.excluded, c.selected_at, c.fixed_at
   FROM {ctx.cfg('config_consumers')} c
   LEFT JOIN {ctx.cfg('config_providers')} p
     ON lower(c.provider_table)=lower(p.provider_table)
-  ORDER BY c.provider_table, c.consumer_table, c.fk_col"""))
+  ORDER BY c.repair_status, c.provider_table, c.consumer_table, c.fk_col"""))

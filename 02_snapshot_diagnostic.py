@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 01 — Legacy Snapshots + SCD2 Version Diagnostic
+# MAGIC # 02 — Legacy Snapshots + SCD2 Version Diagnostic
 # MAGIC
 # MAGIC Per enabled provider:
 # MAGIC 1. **Snapshot** the legacy table from the foreign catalog into `staging.legacy_<t>`,
@@ -16,11 +16,7 @@
 
 # COMMAND ----------
 
-w = create_widgets({
-    "refresh_snapshots": "false",   # 'true' re-snapshots even if one exists (§1.5: once, normally)
-    "auto_set_path": "true",        # write suggested A/B into config_providers if unset
-    "path_a_threshold": "0.99",     # min VERSION_MATCHED share (of legacy versions) for Path A
-})
+w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
 providers = load_providers(ctx)
 assert providers, "No enabled providers in scope."
@@ -170,4 +166,4 @@ display(spark.sql(f"""
 
 if errors:
     raise Exception("01 finished with blocking issues:\n" + "\n".join(errors))
-print("01 complete. Review paths above, then run 02_provider_hash_keymap.")
+print("02 complete. Review paths above, then run 03_provider_hash_keymap.")

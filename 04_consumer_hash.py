@@ -1,12 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 03 — Consumer Classification + Hash Population (Use Cases C, D-consumer)
+# MAGIC # 04 — Consumer Classification + Hash Population (Use Cases C, D-consumer)
 # MAGIC
 # MAGIC Two modes (widget `mode`):
 # MAGIC - **classify** (read-only, run first): C1 evidence per consumer × FK role — how the
 # MAGIC   consumer's current FK values land in the provider's key-map. Records evidence and a
 # MAGIC   *suggestion*; the actual `classification` must be set by a human (attestation, §6 C1),
-# MAGIC   via `set_classification()` below.
+# MAGIC   via `classifications_json` in `00_setup`. Only **`repair_status=SELECTED`**
+# MAGIC   rows run (when `repair_mode=opt_in`).
 # MAGIC - **populate**: adds + populates `<fk>_nk_hash` (and `<fk>_ver_hash` for Path-A providers)
 # MAGIC   per role, from key-map (LEGACY_KEYED, C2a) or current provider (RELOADED, C2b).
 # MAGIC   **SKs are never touched here.** NULL hash = orphan report; nothing is invented.
@@ -20,18 +21,20 @@
 
 # COMMAND ----------
 
-w = create_widgets({
-    "mode": "classify",            # 'classify' | 'populate'
-    "recompute_hashes": "false",   # populate: 'true' clears the WHERE-NULL guard
-    "suggest_threshold": "0.95",   # share of FKs resolving via keymap to suggest LEGACY_KEYED
-})
+w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
 mode = w["mode"].lower()
 assert mode in ("classify", "populate"), mode
 
+if mode == "classify":
+    apply_setup_config(ctx, w, sections=("repair_selection",))
+elif mode == "populate":
+    apply_setup_config(ctx, w, sections=("classifications", "consumer_overrides", "repair_selection"))
+
 providers = providers_by_name(ctx)
-consumers = load_consumers(ctx)
-assert consumers, "No consumers in scope — run 00 discovery first."
+consumers = load_consumers(ctx, repair_phase="repair")
+assert consumers, ("No consumers queued for repair — set repair_selection_json to SELECTED "
+                   "(or repair_mode=opt_out). Query config_consumers for DISCOVERED rows.")
 warnings, errors = [], []
 
 def prov(c):
@@ -88,22 +91,6 @@ if mode == "classify":
     record_rows(ctx, "classification_evidence", ev_rows, ev_schema)
 
 # COMMAND ----------
-
-def set_classification(consumer_table, fk_col, classification, note="attested"):
-    """Record the migration team's attestation: 'LEGACY_KEYED' | 'RELOADED' | 'MIXED'."""
-    assert classification in ("LEGACY_KEYED", "RELOADED", "MIXED")
-    spark.sql(f"""
-      UPDATE {ctx.cfg('config_consumers')}
-      SET classification = '{classification}',
-          notes = concat_ws(' | ', notes, '{note}'),
-          updated_at = current_timestamp()
-      WHERE lower(consumer_table)=lower('{consumer_table}')
-        AND lower(fk_col)=lower('{fk_col}')""")
-    print(f"classified {consumer_table}.{fk_col} = {classification}")
-
-# Examples:
-# set_classification("factPayments", "keyAccount", "LEGACY_KEYED", "not reloaded per migration log")
-# set_classification("factReturns",  "keyAccount", "RELOADED", "reloaded 2026-05-02 after dims")
 
 # COMMAND ----------
 
@@ -174,9 +161,9 @@ if mode == "classify":
       SELECT consumer_table, fk_col, provider_table, map_status, cnt, suggested
       FROM {ctx.cfg('classification_evidence')} WHERE run_id = '{RUN_ID}'
       ORDER BY consumer_table, fk_col, map_status"""))
-    print("Review evidence, get attestation, call set_classification(), "
-          "then re-run with mode=populate.")
+    print("Review evidence, set repair_status=SELECTED + classifications_json in 00_setup, "
+          "re-save, set mode=populate, then re-run this notebook.")
 else:
     if errors:
         raise Exception("\n".join(errors))
-    print("03 populate complete. Next: 04_validate (the hard gate).")
+    print("04 populate complete. Next: 05_validate (the hard gate).")

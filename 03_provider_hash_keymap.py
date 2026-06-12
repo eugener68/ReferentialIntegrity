@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 02 — Provider Hashes + Key-Maps (Use Cases A, B, D-provider)
+# MAGIC # 03 — Provider Hashes + Key-Maps (Use Cases A, B, D-provider)
 # MAGIC
 # MAGIC Per enabled provider, in topo order:
 # MAGIC 1. Add + populate `nk_hash` (and `ver_hash` for Path-A SCD2/HUB) on the **target** table.
@@ -16,10 +16,7 @@
 
 # COMMAND ----------
 
-w = create_widgets({
-    "recompute_hashes": "false",   # 'true' recomputes all rows (after NK config changes)
-    "build_keymaps": "true",
-})
+w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
 providers = load_providers(ctx)
 assert providers, "No enabled providers in scope."
@@ -52,7 +49,7 @@ def path(p):     return (p["version_match_path"] or "").upper()
 for p in providers:
     t = p["provider_table"]
     if is_scd2(p) and path(p) not in ("A", "B"):
-        errors.append(f"{t}: version_match_path not set — run 01 or set manually")
+        errors.append(f"{t}: version_match_path not set — run 02 or set manually")
         gate_failed.add(t.lower())
         continue
     cols = {"nk_hash": "BIGINT"}
@@ -247,4 +244,4 @@ record_rows(ctx, "keymap_audit", audit_rows, audit_schema)
 
 if errors:
     raise Exception("02 finished with gate failures — fix providers, re-run:\n" + "\n".join(errors))
-print("02 complete. All gates green, key-maps built. Next: 03_consumer_hash (mode=classify).")
+print("03 complete. All gates green, key-maps built. Next: 04_consumer_hash (mode=classify).")

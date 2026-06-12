@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 05 — SK Sweep (§6 C4–C5, §7 D6–D7) — idempotent, providers-first
+# MAGIC # 06 — SK Sweep (§6 C4–C5, §7 D6–D7) — idempotent, providers-first
 # MAGIC
 # MAGIC Re-keys consumer FK columns **via the hash join** (never via old_sk→new_sk — that's
 # MAGIC the overlapping-range hazard). Guarded MERGE (`fk <> new_sk`) makes every sweep a
@@ -9,7 +9,7 @@
 # MAGIC Ordering: consumers that are themselves providers (hubs) sweep first, by `topo_level`,
 # MAGIC then facts. A hub's **own SK is never swept** — only the FK columns inside it.
 # MAGIC
-# MAGIC Refuses to run unless the latest 04 validation run in scope is green
+# MAGIC Refuses to run unless the latest 05 validation run in scope is green
 # MAGIC (`require_validation=false` to override — don't, outside rehearsal).
 # MAGIC
 # MAGIC ⚠️ Mutates target tables. Frozen-pipeline window + rehearsal-first are mandatory (§8, §9).
@@ -20,15 +20,11 @@
 
 # COMMAND ----------
 
-w = create_widgets({
-    "require_validation": "true",
-    "orphan_sk": "-1",            # unknown-member SK
-    "apply_orphan_sk": "false",   # 'true' = point NULL-hash rows at orphan_sk (C4 last step)
-})
+w = load_package_settings(require_saved=True)
 ctx = Ctx(w)
 providers = providers_by_name(ctx)
-consumers = load_consumers(ctx)
-assert consumers, "No consumers in scope."
+consumers = load_consumers(ctx, repair_phase="repair")
+assert consumers, "No consumers queued for repair."
 
 def is_scd2(p):  return p["archetype"] in ("SCD2", "HUB_SCD2")
 def path(p):     return (p["version_match_path"] or "").upper()
@@ -43,7 +39,7 @@ if w["require_validation"].lower() == "true":
     last = spark.sql(f"""
       SELECT run_id FROM {ctx.cfg('validation_results')}
       ORDER BY run_at DESC LIMIT 1""").collect()
-    assert last, "No validation runs found — run 04 first."
+    assert last, "No validation runs found — run 05_validate first."
     last_run = last[0].run_id
     in_scope = {(c["consumer_table"].lower(), c["fk_col"].lower()) for c in consumers}
     rows = spark.sql(f"""
@@ -56,7 +52,7 @@ if w["require_validation"].lower() == "true":
     assert not fails, ("Latest validation has FAILs in scope:\n" +
                        "\n".join(f"  {r.consumer_table}.{r.fk_col}: {r.check_name}" for r in fails))
     assert not missing, (f"Roles in scope but absent from latest validation run {last_run}: "
-                         f"{sorted(missing)} — re-run 04 covering them.")
+                         f"{sorted(missing)} — re-run 05_validate covering them.")
     print(f"Validation gate OK (run {last_run}).")
 
 # COMMAND ----------
@@ -145,6 +141,8 @@ WHERE `{nk_col}` IS NULL AND `{fk}` IS NOT NULL AND `{fk}` <> {orphan_sk}""",
         if post:
             errors.append(f"{t}.{fk}: POST-SWEEP anti-join = {post} (expected 0)")
         print(f"  {t}.{fk}: post-sweep SK anti-join = {post}")
+        if post == 0:
+            promote_consumers_fixed(ctx, t, fk, RUN_ID)
 
     sweep_rows.append((RUN_ID, t, fk, pt, "SWEPT", updated, post,
                        datetime.datetime.utcnow()))
@@ -163,9 +161,9 @@ display(spark.sql(f"""
   ORDER BY consumer_table, fk_col"""))
 
 if errors:
-    raise Exception("05 finished with issues:\n" + "\n".join(errors))
-print("""05 complete. Remaining checklist (§8):
-  - re-run 04 (battery must still pass post-sweep)
+    raise Exception("06 finished with issues:\n" + "\n".join(errors))
+print("""06 complete. Remaining checklist (§8):
+  - re-run 05_validate (battery must still pass post-sweep)
   - REBUILD GOLD from repaired silver, re-run RI battery in gold
   - resume pipelines (silver loads first, then gold refresh)
   - keep: keymap schema (permanent), hash columns (forever), snapshots (per retention)
